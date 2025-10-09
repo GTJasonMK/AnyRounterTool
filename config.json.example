@@ -1,0 +1,35 @@
+{
+  "browser": {
+    "headless": true,
+    "timeout": 20,
+    "page_load_timeout": 30,
+    "implicitly_wait": 2,
+    "window_size": "1920,1080",
+    "user_agent": null,
+    "disable_images": true,
+    "disable_javascript": false
+  },
+  "performance": {
+    "max_workers": 9,
+    "auto_detect_workers": false,
+    "query_interval": 60,
+    "retry_times": 2,
+    "retry_delay": 3
+  },
+  "ui": {
+    "window_size": [
+      150,
+      200
+    ],
+    "collapsed_size": [
+      50,
+      50
+    ],
+    "stay_on_top": true,
+    "collapse_delay": 600
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "anyrouter_monitor.log"
+  }
+}

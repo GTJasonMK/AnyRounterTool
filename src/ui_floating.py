@@ -1,171 +1,157 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+悬浮窗口UI - 完全仿照原版设计
+"""
 
-import sys
-import time
 import os
+import sys
+import json
+import logging
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from typing import Optional, List
+from datetime import datetime
+from pathlib import Path
 
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout,
-                            QTableWidget, QTableWidgetItem, QPushButton, QWidget, QMenu, QLabel, QMessageBox,
-                            QHBoxLayout)
-from PyQt6.QtCore import pyqtSignal, QThread, Qt, QTimer, QRect, QPoint
-from PyQt6.QtGui import QAction, QPainter, QBrush, QColor, QFont, QPalette, QLinearGradient, QPen
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QTableWidget, QTableWidgetItem, QPushButton, QLabel, QMenu,
+    QMessageBox, QHeaderView
+)
+from PyQt6.QtCore import (
+    Qt, QThread, pyqtSignal, QTimer, QPoint, QRect, QSize
+)
+from PyQt6.QtGui import (
+    QAction, QPainter, QBrush, QColor, QFont, QPen,
+    QLinearGradient, QCursor
+)
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-
-try:
-    import psutil
-    WORKERS = min(psutil.cpu_count(), 9)
-except ImportError:
-    WORKERS = 6
+from src.config_manager import ConfigManager, Account
+from src.monitor_service import BalanceMonitorService
 
 
-@contextmanager
-def chrome(profile):
-    driver = None
-    try:
-        options = Options()
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-extensions")
-        options.add_argument("--disable-images")
-        if profile:
-            options.add_argument(f"--user-data-dir={os.getcwd()}/chrome_profiles/{profile}")
-
-        driver = webdriver.Chrome(
-            service=Service(f"{os.getcwd()}/chromedriver.exe"),
-            options=options
-        )
-        driver.implicitly_wait(2)
-        driver.set_page_load_timeout(20)
-        yield driver
-    except:
-        yield None
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
-
-
-def get_balance(username, password, profile):
-    with chrome(profile) as driver:
-        if not driver:
-            return username, "Chrome失败", False
-
-        try:
-            driver.get("https://anyrouter.top/console")
-            time.sleep(2)
-
-            if '/login' in driver.current_url:
-                driver.get("https://anyrouter.top/login")
-                time.sleep(3)
-
-                try:
-                    email_btn = driver.find_element(By.CSS_SELECTOR, "button[type='button'] span.semi-icon-mail")
-                    driver.execute_script("arguments[0].click();", email_btn)
-                    time.sleep(3)
-                except:
-                    pass
-
-                username_input = WebDriverWait(driver, 8).until(
-                    EC.presence_of_element_located((By.NAME, "username"))
-                )
-                password_input = driver.find_element(By.NAME, "password")
-                username_input.send_keys(username)
-                password_input.send_keys(password)
-
-                submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
-                driver.execute_script("arguments[0].click();", submit_btn)
-                time.sleep(4)
-
-                driver.get("https://anyrouter.top/console")
-                time.sleep(2)
-
-            time.sleep(5)
-            try:
-                WebDriverWait(driver, 10).until_not(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".semi-skeleton-title"))
-                )
-            except:
-                pass
-            time.sleep(2)
-
-            balance = driver.execute_script("""
-                var text = document.body.innerText;
-                var match = text.match(/当前余额\\s*\\$([\\d,]+\\.?\\d*)/);
-                if (match) return '$' + parseFloat(match[1].replace(/,/g, '')).toFixed(1);
-
-                var elements = document.querySelectorAll('.text-lg.font-semibold');
-                for (var i = 0; i < elements.length; i++) {
-                    var text = elements[i].textContent.trim();
-                    var dollarMatch = text.match(/^\\$([\\d,]+\\.?\\d*)$/);
-                    if (dollarMatch) return '$' + parseFloat(dollarMatch[1].replace(/,/g, '')).toFixed(1);
-                }
-
-                return null;
-            """)
-
-            return username, balance or "无数据", balance is not None
-
-        except Exception as e:
-            return username, f"错误", False
-
-
-class Worker(QThread):
-    result = pyqtSignal(str, str, bool)
+class MonitorWorker(QThread):
+    """监控工作线程"""
+    result = pyqtSignal(str, str, bool)  # username, balance, success
     finished = pyqtSignal()
 
-    def __init__(self, credentials):
+    def __init__(self, service: BalanceMonitorService):
         super().__init__()
-        self.credentials = credentials
+        self.service = service
+        # 设置为守护线程，主程序退出时自动结束
+        self.setTerminationEnabled(True)
 
     def run(self):
-        with ThreadPoolExecutor(max_workers=WORKERS) as executor:
-            futures = [
-                executor.submit(get_balance, user, pwd, f"p_{i}_{user}")
-                for i, (user, pwd) in enumerate(self.credentials)  # 现在是两列格式
-            ]
+        """执行监控任务"""
+        # 设置回调
+        self.service.on_balance_update = lambda u, b, s: self.result.emit(u, b, s)
 
-            for future in as_completed(futures):
-                try:
-                    user, balance, success = future.result(timeout=90)
-                    self.result.emit(user, balance, success)
-                except:
-                    pass
+        # 执行检查
+        results = self.service.check_all_accounts()
 
         self.finished.emit()
 
 
-class Monitor(QMainWindow):
+class FloatingMonitor(QMainWindow):
+    """悬浮监控窗口 - 仿照原版"""
+
     def __init__(self):
         super().__init__()
-        self.credentials = []
-        self.worker = None
-        self.current_env_token = os.environ.get('ANTHROPIC_AUTH_TOKEN', '')
+        self.logger = logging.getLogger(__name__)
+
+        # 初始化配置和服务
+        self.config = ConfigManager()
+        self.service = BalanceMonitorService(self.config)
+
+        # 工作线程
+        self.worker: Optional[MonitorWorker] = None
+
+        # UI状态
         self.is_expanded = False
+        self.drag_pos: Optional[QPoint] = None
         self.hover_timer = QTimer()
         self.hover_timer.timeout.connect(self.start_collapse)
         self.collapsed_center = None  # 记忆小圆圈的中心点
+
+        # Claude配置文件路径
+        self.claude_settings_path = Path.home() / ".claude" / "settings.json"
+
+        # 从Claude配置文件读取当前Token
+        self.current_env_token = self._load_current_token()
+
+        # 初始化UI
         self.init_ui()
         self.load_accounts()
+
         # 启动时为收缩状态
         self.set_collapsed_state()
 
+        # 添加快捷键 - Esc快速退出
+        from PyQt6.QtGui import QShortcut, QKeySequence
+        self.quit_shortcut = QShortcut(QKeySequence("Ctrl+Q"), self)
+        self.quit_shortcut.activated.connect(self.close)
+
+    def _load_current_token(self) -> str:
+        """从Claude配置文件加载当前Token"""
+        try:
+            if not self.claude_settings_path.exists():
+                self.logger.warning(f"Claude配置文件不存在: {self.claude_settings_path}")
+                return ""
+
+            with open(self.claude_settings_path, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+                # Claude配置格式: {"env": {"ANTHROPIC_AUTH_TOKEN": "..."}}
+                env_settings = settings.get('env', {})
+                token = env_settings.get('ANTHROPIC_AUTH_TOKEN', '')
+                if token:
+                    self.logger.info(f"从Claude配置加载Token: {token[:15]}...")
+                return token
+
+        except Exception as e:
+            self.logger.error(f"读取Claude配置文件失败: {e}")
+            return ""
+
+    def _save_token_to_claude_settings(self, token: str) -> bool:
+        """保存Token到Claude配置文件"""
+        try:
+            # 确保目录存在
+            self.claude_settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # 读取现有配置
+            settings = {}
+            if self.claude_settings_path.exists():
+                try:
+                    with open(self.claude_settings_path, 'r', encoding='utf-8') as f:
+                        settings = json.load(f)
+                except json.JSONDecodeError:
+                    self.logger.warning("现有配置文件格式错误，将创建新配置")
+                    settings = {}
+
+            # 确保env字段存在
+            if 'env' not in settings:
+                settings['env'] = {}
+
+            # 更新Token（保持Claude配置的嵌套结构）
+            settings['env']['ANTHROPIC_AUTH_TOKEN'] = token
+
+            # 保存配置
+            with open(self.claude_settings_path, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, indent=2, ensure_ascii=False)
+
+            self.logger.info(f"成功保存Token到Claude配置文件: {self.claude_settings_path}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"保存Token到Claude配置失败: {e}")
+            return False
+
     def init_ui(self):
+        """初始化UI - 完全仿照原版"""
         self.setWindowTitle("余额监控")
-        self.collapsed_size = (50, 50)  # 收缩时更小一些
-        self.expanded_size = (320, 280)  # 展开时稍微紧凑
+
+        # 窗口大小设置
+        self.collapsed_size = (50, 50)
+        self.expanded_size = (320, 350)  # 增加高度以容纳退出按钮
         self.setFixedSize(*self.expanded_size)
 
         # 设置窗口属性：无边框、置顶、透明背景
@@ -195,7 +181,7 @@ class Monitor(QMainWindow):
         layout.setContentsMargins(15, 15, 15, 15)
         layout.setSpacing(8)
 
-        # 设置样式
+        # 设置原版样式
         self.setStyleSheet("""
             #content {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -277,7 +263,7 @@ class Monitor(QMainWindow):
             }
         """)
 
-        # 创建一个用于收缩状态的图标标签
+        # 创建收缩状态的图标标签
         self.collapsed_label = QLabel("●")
         self.collapsed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.collapsed_label.setStyleSheet("""
@@ -297,7 +283,7 @@ class Monitor(QMainWindow):
         layout.addWidget(self.btn)
 
         # 环境变量状态显示
-        self.env_label = QLabel("环境变量: 检测中...")
+        self.env_label = QLabel("Claude配置: 检测中...")
         self.env_label.setStyleSheet("font-size: 10px; color: #7070a0; padding: 2px;")
         layout.addWidget(self.env_label)
 
@@ -309,7 +295,53 @@ class Monitor(QMainWindow):
         self.table.customContextMenuRequested.connect(self.show_context_menu)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
+
+        # 设置列宽
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(True)
+
         layout.addWidget(self.table)
+
+        # 总余额显示
+        self.total_label = QLabel("总余额: --")
+        self.total_label.setStyleSheet("""
+            font-size: 12px;
+            color: #90d090;
+            padding: 4px;
+            font-weight: bold;
+        """)
+        self.total_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.total_label)
+
+        # 退出按钮
+        self.quit_btn = QPushButton("退 出")
+        self.quit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.quit_btn.clicked.connect(self.force_quit)
+        self.quit_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #ff5555,
+                    stop:1 #ff8855);
+                border: none;
+                border-radius: 15px;
+                color: white;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 6px;
+                min-height: 20px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #ff6666,
+                    stop:1 #ff9966);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #ee4444,
+                    stop:1 #ee7744);
+            }
+        """)
+        layout.addWidget(self.quit_btn)
 
         # 设置初始位置（右侧中央偏下）
         screen = QApplication.primaryScreen().availableGeometry()
@@ -323,70 +355,37 @@ class Monitor(QMainWindow):
             initial_y + self.collapsed_size[1] // 2
         )
 
-    def create_env_status_label(self):
-        """创建环境变量状态标签"""
-        if self.current_env_token:
-            # 查找对应的用户名
-            current_user = "未知"
-            for user, _, apikey in self.credentials:
-                if apikey == self.current_env_token:
-                    current_user = user
-                    break
-
-            env_text = f"环境变量: {current_user} ({self.current_env_token[:15]}...)"
-        else:
-            env_text = "环境变量: 未设置"
-
-        from PyQt6.QtWidgets import QLabel
-        label = QLabel(env_text)
-        label.setStyleSheet("font-size: 10px; color: #666; padding: 2px;")
-        return label
-
     def load_accounts(self):
-        try:
-            with open("credentials.txt", "r", encoding="utf-8") as f:
-                self.credentials = []
-                for line in f:
-                    line = line.strip()
-                    if ',' in line:
-                        parts = line.split(',')
-                        if len(parts) >= 3:
-                            username, password, apikey = parts[0], parts[1], parts[2]
-                            self.credentials.append((username.strip(), password.strip(), apikey.strip()))
-                        elif len(parts) == 2:
-                            username, password = parts[0], parts[1]
-                            self.credentials.append((username.strip(), password.strip(), ""))
+        """加载账号列表"""
+        accounts = self.config.accounts
+        self.table.setRowCount(len(accounts))
 
-            self.table.setRowCount(len(self.credentials))
-            for i, (user, _, apikey) in enumerate(self.credentials):
-                # 检查是否为当前环境变量使用的API key
-                display_name = user
-                if apikey and apikey == self.current_env_token:
-                    display_name = f"● {user}"  # 用圆点标记当前使用的
+        for i, account in enumerate(accounts):
+            # 检查是否为当前环境变量使用的API key
+            display_name = account.username
+            if account.api_key and account.api_key == self.current_env_token:
+                display_name = f"● {account.username}"
 
-                self.table.setItem(i, 0, QTableWidgetItem(display_name))
-                self.table.setItem(i, 1, QTableWidgetItem("等待"))
-                self.table.setItem(i, 2, QTableWidgetItem("待机"))
+            self.table.setItem(i, 0, QTableWidgetItem(display_name))
+            self.table.setItem(i, 1, QTableWidgetItem("等待"))
+            self.table.setItem(i, 2, QTableWidgetItem("待机"))
 
-            # 更新环境变量状态显示
-            self.update_env_status_display()
-
-        except:
-            pass
+        # 更新环境变量状态显示
+        self.update_env_status_display()
 
     def update_env_status_display(self):
-        """更新环境变量状态显示"""
+        """更新Claude配置状态显示"""
         if self.current_env_token:
             # 查找对应的用户名
             current_user = "未知"
-            for user, _, apikey in self.credentials:
-                if apikey == self.current_env_token:
-                    current_user = user
+            for account in self.config.accounts:
+                if account.api_key == self.current_env_token:
+                    current_user = account.username
                     break
 
-            env_text = f"环境变量: {current_user} ({self.current_env_token[:15]}...)"
+            env_text = f"Claude配置: {current_user} ({self.current_env_token[:15]}...)"
         else:
-            env_text = "环境变量: 未设置"
+            env_text = "Claude配置: 未设置"
 
         self.env_label.setText(env_text)
 
@@ -397,12 +396,13 @@ class Monitor(QMainWindow):
             return
 
         row = item.row()
-        if row >= len(self.credentials):
+        if row >= len(self.config.accounts):
             return
 
-        # 获取用户信息
-        username = self.credentials[row][0]
-        apikey = self.credentials[row][2] if len(self.credentials[row]) > 2 else ""
+        # 获取账号信息
+        account = self.config.accounts[row]
+        username = account.username
+        apikey = account.api_key if account.api_key else ""
 
         if not apikey:
             return
@@ -418,13 +418,13 @@ class Monitor(QMainWindow):
         # 分隔线
         menu.addSeparator()
 
-        # 设置环境变量选项
+        # 设置Claude配置选项
         is_current = apikey == self.current_env_token
         if is_current:
-            env_action = QAction(f"● 当前环境变量", self)
+            env_action = QAction(f"● 当前Claude配置", self)
             env_action.setEnabled(False)  # 禁用，只用于显示状态
         else:
-            env_action = QAction(f"设置为环境变量", self)
+            env_action = QAction(f"设为Claude配置Token", self)
             env_action.triggered.connect(lambda: self.set_env_token(username, apikey))
 
         menu.addAction(env_action)
@@ -436,87 +436,106 @@ class Monitor(QMainWindow):
         """复制API key到剪贴板"""
         clipboard = QApplication.clipboard()
         clipboard.setText(apikey)
-        print(f"已复制API Key: {apikey[:20]}...")
+        self.logger.info(f"已复制API Key: {apikey[:20]}...")
 
     def set_env_token(self, username, apikey):
-        """设置系统环境变量（需要管理员权限）"""
+        """设置Claude配置文件中的Token"""
         try:
-            if os.name == 'nt':  # Windows
-                # 直接使用 /M 参数设置系统环境变量
-                result = subprocess.run(
-                    ['setx', 'ANTHROPIC_AUTH_TOKEN', apikey, '/M'],
-                    capture_output=True,
-                    text=True,
-                    timeout=10
+            # 保存到Claude配置文件
+            if self._save_token_to_claude_settings(apikey):
+                # 更新当前Token
+                self.current_env_token = apikey
+
+                # 刷新显示
+                self.refresh_user_display()
+                self.update_env_status_display()
+
+                # 成功消息
+                QMessageBox.information(
+                    self,
+                    "Claude配置更新成功",
+                    f"已将 {username} 的API Key设置为Claude配置Token\n\n"
+                    f"配置文件: {self.claude_settings_path}\n"
+                    f"Token: {apikey[:15]}...\n\n"
+                    f"配置已立即生效"
                 )
 
-                if result.returncode == 0:
-                    # 更新当前进程环境变量
-                    os.environ['ANTHROPIC_AUTH_TOKEN'] = apikey
-                    self.current_env_token = apikey
-
-                    # 刷新显示
-                    self.refresh_user_display()
-                    self.update_env_status_display()
-
-                    # 成功消息
-                    QMessageBox.information(
-                        self,
-                        "系统环境变量设置成功",
-                        f"已将 {username} 的API Key设置为系统环境变量\n\n"
-                        f"作用域: 整个系统（所有用户）\n"
-                        f"当前进程: 立即生效\n"
-                        f"其他程序: 重启后生效"
-                    )
-
-                    print(f"系统环境变量设置成功: {username}")
-                    return True
-                else:
-                    # 权限不足或其他错误
-                    error_msg = result.stderr.strip()
-                    if "拒绝访问" in error_msg or "Access is denied" in error_msg:
-                        QMessageBox.critical(
-                            self,
-                            "权限不足",
-                            f"设置系统环境变量需要管理员权限\n\n"
-                            f"解决方法:\n"
-                            f"1. 右键程序 → 以管理员身份运行\n"
-                            f"2. 或在管理员命令行中启动程序"
-                        )
-                    else:
-                        QMessageBox.warning(
-                            self,
-                            "设置失败",
-                            f"系统环境变量设置失败\n\n错误: {error_msg}"
-                        )
-                    return False
+                self.logger.info(f"Claude配置更新成功: {username}")
+                return True
             else:
-                # 非Windows系统
-                QMessageBox.warning(
+                QMessageBox.critical(
                     self,
-                    "不支持的系统",
-                    f"系统环境变量设置仅支持Windows系统\n\n"
-                    f"当前系统: {os.name}"
+                    "设置失败",
+                    f"无法写入Claude配置文件\n\n"
+                    f"请检查文件权限: {self.claude_settings_path}"
                 )
                 return False
 
-        except subprocess.TimeoutExpired:
-            QMessageBox.warning(self, "设置超时", "系统环境变量设置超时")
-            return False
         except Exception as e:
-            QMessageBox.warning(self, "设置失败", f"系统环境变量设置失败: {str(e)}")
+            QMessageBox.warning(self, "设置失败", f"Claude配置设置失败: {str(e)}")
+            self.logger.error(f"设置Claude配置失败: {e}")
             return False
 
     def refresh_user_display(self):
         """刷新用户显示，更新环境变量标记"""
-        for i, (user, _, apikey) in enumerate(self.credentials):
-            display_name = user
-            if apikey and apikey == self.current_env_token:
-                display_name = f"● {user}"
+        for i, account in enumerate(self.config.accounts):
+            display_name = account.username
+            if account.api_key and account.api_key == self.current_env_token:
+                display_name = f"● {account.username}"
 
             self.table.item(i, 0).setText(display_name)
 
+    def force_quit(self):
+        """强制退出程序"""
+        self.logger.info("用户点击退出按钮，强制退出...")
+
+        try:
+            # 立即杀死所有Chrome进程
+            import psutil
+            import subprocess
+
+            # Windows使用taskkill命令强制杀死
+            if os.name == 'nt':
+                try:
+                    subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
+                                 capture_output=True, timeout=1)
+                    subprocess.run(['taskkill', '/F', '/IM', 'chromedriver.exe', '/T'],
+                                 capture_output=True, timeout=1)
+                except:
+                    pass
+
+            # 使用psutil杀死Chrome进程
+            try:
+                for proc in psutil.process_iter(['name']):
+                    try:
+                        name = proc.info['name'].lower()
+                        if 'chrome' in name or 'chromedriver' in name:
+                            proc.kill()
+                    except:
+                        pass
+            except:
+                pass
+        except:
+            pass
+
+        # 直接强制退出，不等待任何清理
+        import os
+        os._exit(0)
+
+    def show_main_context_menu(self, pos):
+        """显示主窗口右键菜单"""
+        menu = QMenu(self)
+
+        # 退出选项
+        quit_action = QAction("退出 (Ctrl+Q)", self)
+        quit_action.triggered.connect(self.close)
+        menu.addAction(quit_action)
+
+        # 显示菜单
+        menu.exec(pos)
+
     def query(self):
+        """开始查询"""
         if self.worker and self.worker.isRunning():
             return
 
@@ -530,14 +549,14 @@ class Monitor(QMainWindow):
             self.table.item(i, 1).setText("查询中...")
             self.table.item(i, 2).setText("...")
 
-        # 只传递用户名和密码给Worker（前两列）
-        login_credentials = [(user, pwd) for user, pwd, _ in self.credentials]
-        self.worker = Worker(login_credentials)
+        # 创建并启动工作线程
+        self.worker = MonitorWorker(self.service)
         self.worker.result.connect(self.update_result)
         self.worker.finished.connect(self.query_done)
         self.worker.start()
 
     def update_result(self, user, balance, success):
+        """更新查询结果"""
         for i in range(self.table.rowCount()):
             # 检查用户名（可能带有●标记）
             current_display = self.table.item(i, 0).text()
@@ -546,14 +565,65 @@ class Monitor(QMainWindow):
             if actual_username == user:
                 self.table.item(i, 1).setText(balance)
                 self.table.item(i, 2).setText("OK" if success else "ERR")
+
+                # 设置状态颜色
+                status_item = self.table.item(i, 2)
+                if success:
+                    status_item.setForeground(QColor("#4caf50"))  # 绿色
+                else:
+                    status_item.setForeground(QColor("#f44336"))  # 红色
                 break
 
     def query_done(self):
+        """查询完成"""
         self.btn.setText("查 询")
         self.btn.setEnabled(True)
+
+        # 计算并显示总余额
+        self.update_total_balance()
+
         # 查询完成后启动自动收缩计时器
         if not self.underMouse():
             self.hover_timer.start(2000)  # 2秒后自动收缩
+
+    def update_total_balance(self):
+        """计算并更新总余额显示"""
+        total = 0.0
+        success_count = 0
+
+        for i in range(self.table.rowCount()):
+            balance_text = self.table.item(i, 1).text()
+            status_text = self.table.item(i, 2).text()
+
+            # 只统计成功查询的余额
+            if status_text == "OK":
+                try:
+                    # 尝试解析余额（移除可能的货币符号和格式）
+                    balance_str = balance_text.replace('$', '').replace('¥', '').replace(',', '').strip()
+                    balance = float(balance_str)
+                    total += balance
+                    success_count += 1
+                except (ValueError, AttributeError):
+                    # 无法解析的余额跳过
+                    pass
+
+        # 更新显示
+        if success_count > 0:
+            self.total_label.setText(f"总余额: ${total:.2f} ({success_count}个账号)")
+            self.total_label.setStyleSheet("""
+                font-size: 12px;
+                color: #90ff90;
+                padding: 4px;
+                font-weight: bold;
+            """)
+        else:
+            self.total_label.setText("总余额: --")
+            self.total_label.setStyleSheet("""
+                font-size: 12px;
+                color: #a0a0c0;
+                padding: 4px;
+                font-weight: bold;
+            """)
 
     def set_collapsed_state(self):
         """设置为收缩状态"""
@@ -568,6 +638,8 @@ class Monitor(QMainWindow):
         self.btn.hide()
         self.env_label.hide()
         self.table.hide()
+        self.total_label.hide()
+        self.quit_btn.hide()
         self.collapsed_label.show()
 
         # 调整窗口大小
@@ -602,6 +674,8 @@ class Monitor(QMainWindow):
         self.btn.show()
         self.env_label.show()
         self.table.show()
+        self.total_label.show()
+        self.quit_btn.show()
 
         # 恢复样式
         self.content_widget.setStyleSheet("""
@@ -690,13 +764,16 @@ class Monitor(QMainWindow):
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
             # 拖动时禁用悬停效果，避免干扰
             self.hover_timer.stop()
+        elif event.button() == Qt.MouseButton.RightButton:
+            # 右键菜单
+            self.show_main_context_menu(event.globalPosition().toPoint())
 
     def mouseMoveEvent(self, event):
         """鼠标移动事件（用于拖动）"""
         if event.buttons() == Qt.MouseButton.LeftButton and hasattr(self, 'drag_pos'):
             new_pos = event.globalPosition().toPoint() - self.drag_pos
             self.move(new_pos)
-            # 拖动后更新中心点位置（无论是展开还是收缩状态都要更新）
+            # 拖动后更新中心点位置
             self.collapsed_center = self.geometry().center()
 
     def mouseReleaseEvent(self, event):
@@ -733,10 +810,63 @@ class Monitor(QMainWindow):
 
         super().paintEvent(event)
 
+    def closeEvent(self, event):
+        """窗口关闭事件 - 快速清理所有资源"""
+        self.logger.info("正在关闭窗口并清理资源...")
+
+        try:
+            # 停止计时器
+            if self.hover_timer:
+                self.hover_timer.stop()
+
+            # 强制终止工作线程
+            if self.worker and self.worker.isRunning():
+                self.logger.info("强制终止工作线程...")
+                self.worker.terminate()  # 立即终止，不等待
+                self.worker.wait(500)  # 只等待500毫秒
+
+            # 立即清理浏览器池，不等待
+            try:
+                from src.browser_pool import _global_pool
+                if _global_pool:
+                    self.logger.info("强制关闭浏览器池...")
+                    # 直接遍历所有实例并强制quit
+                    for instance in _global_pool.instances:
+                        try:
+                            instance.driver.quit()
+                        except:
+                            pass
+                    _global_pool.instances.clear()
+            except Exception as e:
+                self.logger.debug(f"关闭浏览器池时出错: {e}")
+
+            # 强制杀死所有Chrome进程
+            try:
+                import psutil
+                for proc in psutil.process_iter(['name']):
+                    try:
+                        if 'chrome' in proc.info['name'].lower():
+                            proc.kill()
+                    except:
+                        pass
+            except:
+                pass
+
+        except Exception as e:
+            self.logger.error(f"关闭窗口时出错: {e}")
+
+        # 立即接受关闭事件，不等待
+        event.accept()
+
+        # 强制退出
+        import os
+        os._exit(0)
+
 
 def main():
+    """主函数"""
     app = QApplication(sys.argv)
-    window = Monitor()
+    window = FloatingMonitor()
     window.show()
     sys.exit(app.exec())
 

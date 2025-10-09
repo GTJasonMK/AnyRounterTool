@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(tree -L 2 -I 'chrome_profiles')"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

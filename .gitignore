@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Logs
+*.log
+log/
+logs/
+
+# Testing
+test_*.py
+*_test.py
+tests/
+testing/
+benchmark*.py
+performance*.py
+
+# Analysis
+analyze_*.py
+*_analysis/
+analysis/
+
+# Screenshots
+screenshots/
+*.png
+*.jpg
+
+# Chrome profiles
+chrome_profiles/
+profile_*/
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+nul
+
+# Sensitive files - 不要提交到Git！
+credentials.txt
+config.json
+
+# Chrome driver - 大型二进制文件，需要单独下载
+chromedriver.exe
+chromedriver
+
+# 临时目录
+tmp/
+temp/
