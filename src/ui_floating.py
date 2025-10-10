@@ -16,7 +16,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QPushButton, QLabel, QMenu,
-    QMessageBox, QHeaderView
+    QMessageBox, QHeaderView, QTextEdit
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QPoint, QRect, QSize
@@ -33,6 +33,7 @@ from src.monitor_service import BalanceMonitorService
 class MonitorWorker(QThread):
     """监控工作线程"""
     result = pyqtSignal(str, str, bool)  # username, balance, success
+    progress = pyqtSignal(str, str)  # username, progress_message
     finished = pyqtSignal()
 
     def __init__(self, service: BalanceMonitorService):
@@ -45,6 +46,7 @@ class MonitorWorker(QThread):
         """执行监控任务"""
         # 设置回调
         self.service.on_balance_update = lambda u, b, s: self.result.emit(u, b, s)
+        self.service.on_progress = lambda u, m: self.progress.emit(u, m)
 
         # 执行检查
         results = self.service.check_all_accounts()
@@ -86,10 +88,28 @@ class FloatingMonitor(QMainWindow):
         # 启动时为收缩状态
         self.set_collapsed_state()
 
-        # 添加快捷键 - Esc快速退出
+        # 添加键盘快捷键
         from PyQt6.QtGui import QShortcut, QKeySequence
+
+        # Ctrl+Q - 退出
         self.quit_shortcut = QShortcut(QKeySequence("Ctrl+Q"), self)
         self.quit_shortcut.activated.connect(self.close)
+
+        # F5 - 刷新查询
+        self.refresh_shortcut = QShortcut(QKeySequence("F5"), self)
+        self.refresh_shortcut.activated.connect(self.query)
+
+        # Esc - 收缩窗口
+        self.collapse_shortcut = QShortcut(QKeySequence("Esc"), self)
+        self.collapse_shortcut.activated.connect(self.direct_collapse)
+
+        # Ctrl+L - 切换进度日志
+        self.toggle_log_shortcut = QShortcut(QKeySequence("Ctrl+L"), self)
+        self.toggle_log_shortcut.activated.connect(self.toggle_progress)
+
+        # Ctrl+Shift+C - 复制总余额
+        self.copy_total_shortcut = QShortcut(QKeySequence("Ctrl+Shift+C"), self)
+        self.copy_total_shortcut.activated.connect(self.copy_total_balance)
 
     def _load_current_token(self) -> str:
         """从Claude配置文件加载当前Token"""
@@ -153,6 +173,9 @@ class FloatingMonitor(QMainWindow):
         self.collapsed_size = (50, 50)
         self.expanded_size = (320, 350)  # 增加高度以容纳退出按钮
         self.setFixedSize(*self.expanded_size)
+
+        # 存储总余额用于收缩态显示
+        self.current_total_balance = 0.0
 
         # 设置窗口属性：无边框、置顶、透明背景
         self.setWindowFlags(
@@ -238,6 +261,31 @@ class FloatingMonitor(QMainWindow):
                 font-size: 12px;
                 font-weight: bold;
             }
+            QTextEdit {
+                background: rgba(15, 15, 25, 80);
+                border: none;
+                color: #a0a0d0;
+                font-size: 9px;
+                padding: 3px;
+                line-height: 1.4;
+            }
+            QScrollBar:vertical {
+                background: rgba(20, 20, 30, 50);
+                width: 8px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(100, 100, 255, 0.3);
+                border-radius: 4px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(100, 100, 255, 0.5);
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
             QLabel {
                 color: #a0a0c0;
                 background: transparent;
@@ -263,13 +311,14 @@ class FloatingMonitor(QMainWindow):
             }
         """)
 
-        # 创建收缩状态的图标标签
-        self.collapsed_label = QLabel("●")
+        # 创建收缩状态的标签 - 显示总余额
+        self.collapsed_label = QLabel("$0")
         self.collapsed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.collapsed_label.setStyleSheet("""
             QLabel {
-                color: #8080ff;
-                font-size: 20px;
+                color: #e0e0ff;
+                font-size: 14px;
+                font-weight: bold;
                 background: transparent;
             }
         """)
@@ -301,6 +350,34 @@ class FloatingMonitor(QMainWindow):
         header.setStretchLastSection(True)
 
         layout.addWidget(self.table)
+
+        # 创建进度文本框（初始隐藏）
+        self.progress_text = QTextEdit()
+        self.progress_text.setReadOnly(True)
+        self.progress_text.setPlaceholderText("查询进度...")
+        self.progress_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.progress_text.hide()  # 初始隐藏
+        layout.addWidget(self.progress_text)
+
+        # 添加切换进度按钮
+        self.toggle_btn = QPushButton("▼ 进度")
+        self.toggle_btn.setMaximumWidth(70)
+        self.toggle_btn.setMaximumHeight(20)
+        self.toggle_btn.clicked.connect(self.toggle_progress)
+        self.toggle_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(60, 60, 80, 100);
+                border: none;
+                border-radius: 3px;
+                color: #a0a0c0;
+                font-size: 9px;
+                padding: 2px;
+            }
+            QPushButton:hover {
+                background: rgba(80, 80, 100, 150);
+            }
+        """)
+        layout.addWidget(self.toggle_btn)
 
         # 总余额显示
         self.total_label = QLabel("总余额: --")
@@ -357,21 +434,86 @@ class FloatingMonitor(QMainWindow):
 
     def load_accounts(self):
         """加载账号列表"""
-        accounts = self.config.accounts
-        self.table.setRowCount(len(accounts))
+        try:
+            accounts = self.config.accounts
+            if not accounts:
+                self.logger.warning("没有找到账号配置")
+                self.add_progress("⚠ 没有找到账号配置，请检查 credentials.txt")
+                return
 
-        for i, account in enumerate(accounts):
-            # 检查是否为当前环境变量使用的API key
-            display_name = account.username
-            if account.api_key and account.api_key == self.current_env_token:
-                display_name = f"● {account.username}"
+            self.table.setRowCount(len(accounts))
 
-            self.table.setItem(i, 0, QTableWidgetItem(display_name))
-            self.table.setItem(i, 1, QTableWidgetItem("等待"))
-            self.table.setItem(i, 2, QTableWidgetItem("待机"))
+            for i, account in enumerate(accounts):
+                # 检查是否为当前环境变量使用的API key
+                display_name = account.username
+                if account.api_key and account.api_key == self.current_env_token:
+                    display_name = f"● {account.username}"
 
-        # 更新环境变量状态显示
-        self.update_env_status_display()
+                self.table.setItem(i, 0, QTableWidgetItem(display_name))
+                self.table.setItem(i, 1, QTableWidgetItem("等待"))
+                self.table.setItem(i, 2, QTableWidgetItem("待机"))
+
+            # 更新环境变量状态显示
+            self.update_env_status_display()
+
+            self.logger.info(f"成功加载 {len(accounts)} 个账号")
+        except Exception as e:
+            self.logger.error(f"加载账号失败: {e}")
+            QMessageBox.critical(
+                self,
+                "加载失败",
+                f"加载账号配置失败: {str(e)}\n\n请检查 credentials.txt 文件格式"
+            )
+
+    def toggle_progress(self):
+        """切换进度显示"""
+        try:
+            if self.progress_text.isVisible():
+                # 切换回表格视图
+                self.progress_text.hide()
+                self.table.show()
+                self.toggle_btn.setText("▼ 进度")
+                self.logger.debug("切换到表格视图")
+            else:
+                # 切换到进度视图
+                self.progress_text.show()
+                self.table.hide()
+                self.toggle_btn.setText("▲ 账号")
+                self.logger.debug("切换到进度视图")
+        except Exception as e:
+            self.logger.error(f"切换视图失败: {e}")
+
+    def add_progress(self, message: str):
+        """添加进度信息"""
+        try:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            self.progress_text.append(f"[{timestamp}] {message}")
+            # 自动滚动到底部
+            cursor = self.progress_text.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self.progress_text.setTextCursor(cursor)
+        except Exception as e:
+            self.logger.error(f"添加进度信息失败: {e}")
+
+    def update_progress(self, username: str, message: str):
+        """更新查询进度"""
+        try:
+            self.add_progress(f"{username}: {message}")
+        except Exception as e:
+            self.logger.error(f"更新进度失败: {e}")
+
+    def copy_total_balance(self):
+        """复制总余额到剪贴板"""
+        try:
+            clipboard = QApplication.clipboard()
+            balance_text = f"${self.current_total_balance:.2f}"
+            clipboard.setText(balance_text)
+            self.logger.info(f"已复制总余额: {balance_text}")
+            self.add_progress(f"已复制总余额到剪贴板: {balance_text}")
+        except Exception as e:
+            self.logger.error(f"复制总余额失败: {e}")
+            self.add_progress(f"✗ 复制失败: {str(e)}")
 
     def update_env_status_display(self):
         """更新Claude配置状态显示"""
@@ -441,6 +583,8 @@ class FloatingMonitor(QMainWindow):
     def set_env_token(self, username, apikey):
         """设置Claude配置文件中的Token"""
         try:
+            self.logger.info(f"正在为 {username} 设置Claude配置Token...")
+
             # 保存到Claude配置文件
             if self._save_token_to_claude_settings(apikey):
                 # 更新当前Token
@@ -461,19 +605,20 @@ class FloatingMonitor(QMainWindow):
                 )
 
                 self.logger.info(f"Claude配置更新成功: {username}")
+                self.add_progress(f"✓ 已设置 {username} 为Claude配置Token")
                 return True
             else:
-                QMessageBox.critical(
-                    self,
-                    "设置失败",
-                    f"无法写入Claude配置文件\n\n"
-                    f"请检查文件权限: {self.claude_settings_path}"
-                )
+                error_msg = f"无法写入Claude配置文件\n\n请检查文件权限: {self.claude_settings_path}"
+                QMessageBox.critical(self, "设置失败", error_msg)
+                self.logger.error(f"保存Token到Claude配置失败: 文件写入失败")
+                self.add_progress(f"✗ 设置Claude配置失败: 文件写入失败")
                 return False
 
         except Exception as e:
-            QMessageBox.warning(self, "设置失败", f"Claude配置设置失败: {str(e)}")
-            self.logger.error(f"设置Claude配置失败: {e}")
+            error_msg = f"Claude配置设置失败: {str(e)}"
+            QMessageBox.warning(self, "设置失败", error_msg)
+            self.logger.error(f"设置Claude配置失败: {e}", exc_info=True)
+            self.add_progress(f"✗ 设置Claude配置失败: {str(e)}")
             return False
 
     def refresh_user_display(self):
@@ -485,42 +630,372 @@ class FloatingMonitor(QMainWindow):
 
             self.table.item(i, 0).setText(display_name)
 
-    def force_quit(self):
-        """强制退出程序"""
-        self.logger.info("用户点击退出按钮，强制退出...")
+    def _show_closing_dialog(self):
+        """显示退出动画对话框 - 在软件窗口正中央"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QTextEdit
+        from PyQt6.QtCore import Qt, QTimer
 
+        # 创建对话框
+        dialog = QDialog(self)
+        dialog.setWindowTitle("正在退出")
+        dialog.setModal(True)
+        dialog.setFixedSize(280, 150)
+
+        # 无边框，置顶
+        dialog.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Dialog
+        )
+
+        # 设置样式
+        dialog.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(25, 25, 35, 245),
+                    stop:1 rgba(35, 35, 50, 245));
+                border-radius: 20px;
+                border: 2px solid rgba(120, 120, 255, 0.5);
+            }
+            QLabel#title {
+                color: #e0e0ff;
+                font-size: 16px;
+                font-weight: bold;
+                background: transparent;
+                padding: 10px;
+            }
+            QTextEdit {
+                background: rgba(15, 15, 25, 150);
+                border: 1px solid rgba(80, 80, 120, 0.3);
+                border-radius: 8px;
+                color: #b0b0e0;
+                font-size: 10px;
+                font-family: 'Consolas', 'Monaco', monospace;
+                padding: 8px;
+            }
+        """)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        # 标题
+        title_label = QLabel("正在清理资源并退出...")
+        title_label.setObjectName("title")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title_label)
+
+        # 进度显示文本框
+        progress_text = QTextEdit()
+        progress_text.setReadOnly(True)
+        progress_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        layout.addWidget(progress_text)
+
+        # 保存对话框引用
+        self.cleanup_dialog = dialog
+        self.cleanup_progress_text = progress_text
+
+        # 计算位置 - 相对于主窗口居中
+        main_geometry = self.geometry()
+        dialog_x = main_geometry.x() + (main_geometry.width() - dialog.width()) // 2
+        dialog_y = main_geometry.y() + (main_geometry.height() - dialog.height()) // 2
+        dialog.move(dialog_x, dialog_y)
+
+        # 显示对话框
+        dialog.show()
+        QApplication.processEvents()
+
+        # 启动清理流程
+        QTimer.singleShot(100, self._start_cleanup_sequence)
+
+        return dialog
+
+    def _add_cleanup_log(self, message: str, level: str = "info"):
+        """添加清理日志到对话框"""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # 毫秒级时间戳
+
+        # 根据级别设置颜色
+        color_map = {
+            "info": "#90b0ff",
+            "success": "#50ff80",
+            "warning": "#ffb050",
+            "error": "#ff5050",
+            "debug": "#a0a0d0"
+        }
+        color = color_map.get(level, "#b0b0e0")
+
+        # 添加带颜色的HTML格式文本
+        html = f'<span style="color: {color};">[{timestamp}] {message}</span>'
+        self.cleanup_progress_text.append(html)
+
+        # 滚动到底部
+        cursor = self.cleanup_progress_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.cleanup_progress_text.setTextCursor(cursor)
+
+        # 强制刷新UI
+        QApplication.processEvents()
+
+    def _start_cleanup_sequence(self):
+        """启动清理序列，逐步执行并显示进度"""
+        from PyQt6.QtCore import QTimer
+
+        self._add_cleanup_log("=" * 60, "info")
+        self._add_cleanup_log("开始清理资源...", "info")
+        self._add_cleanup_log("=" * 60, "info")
+
+        # 步骤1: 停止计时器
+        QTimer.singleShot(50, self._cleanup_step1_timers)
+
+    def _cleanup_step1_timers(self):
+        """清理步骤1: 停止计时器"""
+        from PyQt6.QtCore import QTimer
+
+        self._add_cleanup_log("► 步骤 1/5: 停止计时器", "info")
         try:
-            # 立即杀死所有Chrome进程
+            if hasattr(self, 'hover_timer') and self.hover_timer:
+                self.hover_timer.stop()
+                self._add_cleanup_log("  ✓ 悬停计时器已停止", "success")
+            else:
+                self._add_cleanup_log("  - 没有活动的计时器", "debug")
+        except Exception as e:
+            self._add_cleanup_log(f"  ✗ 停止计时器失败: {e}", "error")
+
+        QTimer.singleShot(100, self._cleanup_step2_worker)
+
+    def _cleanup_step2_worker(self):
+        """清理步骤2: 终止工作线程"""
+        from PyQt6.QtCore import QTimer
+
+        self._add_cleanup_log("► 步骤 2/5: 终止工作线程", "info")
+        try:
+            if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
+                self._add_cleanup_log("  - 检测到运行中的工作线程", "debug")
+                self.worker.terminate()
+                self._add_cleanup_log("  - 发送终止信号...", "debug")
+
+                if self.worker.wait(1000):
+                    self._add_cleanup_log("  ✓ 工作线程已终止", "success")
+                else:
+                    self._add_cleanup_log("  ⚠ 工作线程未响应，强制结束", "warning")
+            else:
+                self._add_cleanup_log("  - 没有运行中的工作线程", "debug")
+        except Exception as e:
+            self._add_cleanup_log(f"  ✗ 终止线程失败: {e}", "error")
+
+        QTimer.singleShot(150, self._cleanup_step3_browser_pool)
+
+    def _cleanup_step3_browser_pool(self):
+        """清理步骤3: 清理浏览器池"""
+        from PyQt6.QtCore import QTimer
+
+        self._add_cleanup_log("► 步骤 3/5: 清理浏览器池", "info")
+        try:
+            from src.browser_pool import _global_pool
+            if _global_pool and _global_pool.instances:
+                instance_count = len(_global_pool.instances)
+                self._add_cleanup_log(f"  - 发现 {instance_count} 个浏览器实例", "debug")
+
+                for idx, instance in enumerate(_global_pool.instances):
+                    try:
+                        self._add_cleanup_log(f"  - 正在关闭实例 {idx+1}/{instance_count}...", "debug")
+                        instance.driver.quit()
+                        self._add_cleanup_log(f"  ✓ 实例 {idx+1} 已关闭", "success")
+                    except Exception as e:
+                        self._add_cleanup_log(f"  ⚠ 实例 {idx+1} 关闭失败: {e}", "warning")
+
+                _global_pool.instances.clear()
+                self._add_cleanup_log(f"  ✓ 浏览器池已清空", "success")
+            else:
+                self._add_cleanup_log("  - 浏览器池为空", "debug")
+        except Exception as e:
+            self._add_cleanup_log(f"  ✗ 清理浏览器池失败: {e}", "error")
+
+        QTimer.singleShot(200, self._cleanup_step4_chrome_processes)
+
+    def _cleanup_step4_chrome_processes(self):
+        """清理步骤4: 清理Chrome进程"""
+        from PyQt6.QtCore import QTimer
+
+        self._add_cleanup_log("► 步骤 4/5: 清理Chrome进程", "info")
+        try:
             import psutil
             import subprocess
 
-            # Windows使用taskkill命令强制杀死
+            killed_count = 0
+
+            # Windows使用taskkill
             if os.name == 'nt':
+                self._add_cleanup_log("  - 使用taskkill清理Chrome进程...", "debug")
                 try:
-                    subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
-                                 capture_output=True, timeout=1)
-                    subprocess.run(['taskkill', '/F', '/IM', 'chromedriver.exe', '/T'],
-                                 capture_output=True, timeout=1)
-                except:
+                    result = subprocess.run(
+                        ['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
+                        capture_output=True, timeout=2, text=True
+                    )
+                    if result.returncode == 0:
+                        self._add_cleanup_log("  ✓ taskkill已终止chrome.exe", "success")
+
+                    result = subprocess.run(
+                        ['taskkill', '/F', '/IM', 'chromedriver.exe', '/T'],
+                        capture_output=True, timeout=2, text=True
+                    )
+                    if result.returncode == 0:
+                        self._add_cleanup_log("  ✓ taskkill已终止chromedriver.exe", "success")
+                except Exception as e:
+                    self._add_cleanup_log(f"  ⚠ taskkill失败: {e}", "warning")
+
+            # 使用psutil扫描残留进程
+            self._add_cleanup_log("  - 扫描残留的Chrome进程...", "debug")
+            for proc in psutil.process_iter(['name', 'pid']):
+                try:
+                    name = proc.info['name'].lower()
+                    if 'chrome' in name or 'chromedriver' in name:
+                        proc.kill()
+                        killed_count += 1
+                        self._add_cleanup_log(f"  ✓ 已终止: {proc.info['name']} (PID: {proc.info['pid']})", "success")
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
 
-            # 使用psutil杀死Chrome进程
+            if killed_count > 0:
+                self._add_cleanup_log(f"  ✓ 共清理 {killed_count} 个Chrome相关进程", "success")
+            else:
+                self._add_cleanup_log("  - 没有发现需要清理的进程", "debug")
+
+        except Exception as e:
+            self._add_cleanup_log(f"  ✗ 清理Chrome进程失败: {e}", "error")
+
+        QTimer.singleShot(200, self._cleanup_step5_finalize)
+
+    def _cleanup_step5_finalize(self):
+        """清理步骤5: 完成清理"""
+        from PyQt6.QtCore import QTimer
+
+        self._add_cleanup_log("► 步骤 5/5: 完成清理", "info")
+        self._add_cleanup_log("=" * 60, "info")
+        self._add_cleanup_log("✓ 所有资源清理完成", "success")
+        self._add_cleanup_log("程序即将退出...", "info")
+        self._add_cleanup_log("=" * 60, "info")
+
+        # 等待1秒让用户看到完成消息
+        QTimer.singleShot(1000, self._do_final_exit)
+
+    def _do_final_exit(self):
+        """最终退出"""
+        import os
+        self.logger.info("程序退出")
+        os._exit(0)
+
+    def _cleanup_all_resources(self):
+        """统一的资源清理方法"""
+        self.logger.info("开始清理所有资源...")
+
+        try:
+            # 1. 停止计时器
+            if hasattr(self, 'hover_timer') and self.hover_timer:
+                self.hover_timer.stop()
+                self.logger.debug("已停止悬停计时器")
+
+            # 2. 强制终止工作线程
+            if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
+                self.logger.info("正在终止工作线程...")
+                self.worker.terminate()
+                self.worker.wait(500)
+                self.logger.info("工作线程已终止")
+
+            # 3. 清理浏览器池
             try:
-                for proc in psutil.process_iter(['name']):
+                from src.browser_pool import _global_pool
+                if _global_pool:
+                    self.logger.info(f"正在清理浏览器池 ({len(_global_pool.instances)} 个实例)...")
+                    for idx, instance in enumerate(_global_pool.instances):
+                        try:
+                            self.logger.debug(f"正在关闭浏览器实例 {idx+1}...")
+                            instance.driver.quit()
+                        except Exception as e:
+                            self.logger.debug(f"关闭浏览器实例 {idx+1} 失败: {e}")
+                    _global_pool.instances.clear()
+                    self.logger.info("浏览器池已清理")
+            except Exception as e:
+                self.logger.debug(f"清理浏览器池时出错: {e}")
+
+            # 4. 强制杀死所有Chrome和ChromeDriver进程
+            self.logger.info("正在清理Chrome进程...")
+            import psutil
+            import subprocess
+
+            killed_count = 0
+
+            # Windows使用taskkill命令
+            if os.name == 'nt':
+                try:
+                    result = subprocess.run(
+                        ['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
+                        capture_output=True, timeout=2, text=True
+                    )
+                    if result.returncode == 0:
+                        self.logger.debug("taskkill已终止chrome.exe")
+
+                    result = subprocess.run(
+                        ['taskkill', '/F', '/IM', 'chromedriver.exe', '/T'],
+                        capture_output=True, timeout=2, text=True
+                    )
+                    if result.returncode == 0:
+                        self.logger.debug("taskkill已终止chromedriver.exe")
+                except Exception as e:
+                    self.logger.debug(f"taskkill命令失败: {e}")
+
+            # 使用psutil杀死残留进程
+            try:
+                for proc in psutil.process_iter(['name', 'pid']):
                     try:
                         name = proc.info['name'].lower()
                         if 'chrome' in name or 'chromedriver' in name:
                             proc.kill()
-                    except:
+                            killed_count += 1
+                            self.logger.debug(f"已终止进程: {proc.info['name']} (PID: {proc.info['pid']})")
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
-            except:
-                pass
-        except:
-            pass
+            except Exception as e:
+                self.logger.debug(f"使用psutil清理进程失败: {e}")
 
-        # 直接强制退出，不等待任何清理
+            if killed_count > 0:
+                self.logger.info(f"已清理 {killed_count} 个Chrome相关进程")
+            else:
+                self.logger.info("没有发现需要清理的Chrome进程")
+
+            # 5. 清理临时目录（如果有）
+            try:
+                import tempfile
+                import shutil
+                temp_base = tempfile.gettempdir()
+                self.logger.debug(f"检查临时目录: {temp_base}")
+                # 这里可以添加清理特定临时文件的逻辑
+            except Exception as e:
+                self.logger.debug(f"清理临时目录时出错: {e}")
+
+            self.logger.info("资源清理完成")
+
+        except Exception as e:
+            self.logger.error(f"清理资源时发生错误: {e}")
+
+    def _do_force_quit(self):
+        """执行强制退出"""
+        self.logger.info("执行强制退出...")
+
+        # 调用统一的清理方法
+        self._cleanup_all_resources()
+
+        # 强制退出
         import os
+        self.logger.info("程序即将退出")
         os._exit(0)
+
+    def force_quit(self):
+        """强制退出程序"""
+        self.logger.info("用户点击退出按钮，准备退出...")
+        # 显示退出动画对话框
+        self._show_closing_dialog()
 
     def show_main_context_menu(self, pos):
         """显示主窗口右键菜单"""
@@ -536,24 +1011,61 @@ class FloatingMonitor(QMainWindow):
 
     def query(self):
         """开始查询"""
-        if self.worker and self.worker.isRunning():
-            return
+        try:
+            if self.worker and self.worker.isRunning():
+                self.add_progress("查询正在进行中，请稍候...")
+                return
 
-        self.btn.setText("查询中...")
-        self.btn.setEnabled(False)
+            # 检查是否有账号
+            if self.table.rowCount() == 0:
+                self.add_progress("✗ 没有账号可查询，请先配置账号")
+                QMessageBox.warning(
+                    self,
+                    "无法查询",
+                    "没有找到账号配置\n\n请检查 credentials.txt 文件"
+                )
+                return
 
-        # 查询时保持展开状态
-        self.hover_timer.stop()
+            self.btn.setText("查询中...")
+            self.btn.setEnabled(False)
 
-        for i in range(self.table.rowCount()):
-            self.table.item(i, 1).setText("查询中...")
-            self.table.item(i, 2).setText("...")
+            # 查询时保持展开状态
+            self.hover_timer.stop()
 
-        # 创建并启动工作线程
-        self.worker = MonitorWorker(self.service)
-        self.worker.result.connect(self.update_result)
-        self.worker.finished.connect(self.query_done)
-        self.worker.start()
+            # 清空并初始化进度显示
+            self.progress_text.clear()
+            self.add_progress("="*50)
+            self.add_progress("开始查询所有账号...")
+            self.add_progress(f"共 {self.table.rowCount()} 个账号待查询")
+            self.add_progress("="*50)
+
+            # 自动切换到进度视图
+            if not self.progress_text.isVisible():
+                self.toggle_progress()
+
+            for i in range(self.table.rowCount()):
+                self.table.item(i, 1).setText("查询中...")
+                self.table.item(i, 2).setText("...")
+
+            # 创建并启动工作线程
+            self.worker = MonitorWorker(self.service)
+            self.worker.result.connect(self.update_result)
+            self.worker.progress.connect(self.update_progress)
+            self.worker.finished.connect(self.query_done)
+            self.worker.start()
+
+            self.logger.info(f"开始查询 {self.table.rowCount()} 个账号")
+
+        except Exception as e:
+            self.logger.error(f"启动查询失败: {e}", exc_info=True)
+            self.add_progress(f"✗ 启动查询失败: {str(e)}")
+            self.btn.setText("查 询")
+            self.btn.setEnabled(True)
+            QMessageBox.critical(
+                self,
+                "查询失败",
+                f"启动查询时发生错误:\n\n{str(e)}"
+            )
 
     def update_result(self, user, balance, success):
         """更新查询结果"""
@@ -570,8 +1082,12 @@ class FloatingMonitor(QMainWindow):
                 status_item = self.table.item(i, 2)
                 if success:
                     status_item.setForeground(QColor("#4caf50"))  # 绿色
+                    # 添加成功日志
+                    self.add_progress(f"✓ {user}: {balance} - 查询成功")
                 else:
                     status_item.setForeground(QColor("#f44336"))  # 红色
+                    # 添加失败日志
+                    self.add_progress(f"✗ {user}: {balance} - 查询失败")
                 break
 
     def query_done(self):
@@ -581,6 +1097,25 @@ class FloatingMonitor(QMainWindow):
 
         # 计算并显示总余额
         self.update_total_balance()
+
+        # 统计查询结果
+        total_count = self.table.rowCount()
+        success_count = 0
+        fail_count = 0
+
+        for i in range(total_count):
+            status = self.table.item(i, 2).text()
+            if status == "OK":
+                success_count += 1
+            elif status == "ERR":
+                fail_count += 1
+
+        # 添加汇总日志
+        self.add_progress("="*50)
+        self.add_progress(f"查询完成！成功: {success_count}/{total_count}, 失败: {fail_count}")
+        if success_count > 0:
+            self.add_progress(f"总余额: ${self.current_total_balance:.2f}")
+        self.add_progress("="*50)
 
         # 查询完成后启动自动收缩计时器
         if not self.underMouse():
@@ -607,7 +1142,10 @@ class FloatingMonitor(QMainWindow):
                     # 无法解析的余额跳过
                     pass
 
-        # 更新显示
+        # 保存总余额用于收缩状态显示
+        self.current_total_balance = total
+
+        # 更新展开状态的显示
         if success_count > 0:
             self.total_label.setText(f"总余额: ${total:.2f} ({success_count}个账号)")
             self.total_label.setStyleSheet("""
@@ -616,6 +1154,8 @@ class FloatingMonitor(QMainWindow):
                 padding: 4px;
                 font-weight: bold;
             """)
+            # 更新收缩状态的显示
+            self.collapsed_label.setText(f"${total:.0f}")
         else:
             self.total_label.setText("总余额: --")
             self.total_label.setStyleSheet("""
@@ -624,6 +1164,8 @@ class FloatingMonitor(QMainWindow):
                 padding: 4px;
                 font-weight: bold;
             """)
+            # 无数据时显示$0
+            self.collapsed_label.setText("$0")
 
     def set_collapsed_state(self):
         """设置为收缩状态"""
@@ -638,6 +1180,8 @@ class FloatingMonitor(QMainWindow):
         self.btn.hide()
         self.env_label.hide()
         self.table.hide()
+        self.progress_text.hide()
+        self.toggle_btn.hide()
         self.total_label.hide()
         self.quit_btn.hide()
         self.collapsed_label.show()
@@ -674,6 +1218,7 @@ class FloatingMonitor(QMainWindow):
         self.btn.show()
         self.env_label.show()
         self.table.show()
+        self.toggle_btn.show()
         self.total_label.show()
         self.quit_btn.show()
 
@@ -811,51 +1356,16 @@ class FloatingMonitor(QMainWindow):
         super().paintEvent(event)
 
     def closeEvent(self, event):
-        """窗口关闭事件 - 快速清理所有资源"""
-        self.logger.info("正在关闭窗口并清理资源...")
+        """窗口关闭事件"""
+        self.logger.info("正在关闭窗口...")
 
         try:
-            # 停止计时器
-            if self.hover_timer:
-                self.hover_timer.stop()
-
-            # 强制终止工作线程
-            if self.worker and self.worker.isRunning():
-                self.logger.info("强制终止工作线程...")
-                self.worker.terminate()  # 立即终止，不等待
-                self.worker.wait(500)  # 只等待500毫秒
-
-            # 立即清理浏览器池，不等待
-            try:
-                from src.browser_pool import _global_pool
-                if _global_pool:
-                    self.logger.info("强制关闭浏览器池...")
-                    # 直接遍历所有实例并强制quit
-                    for instance in _global_pool.instances:
-                        try:
-                            instance.driver.quit()
-                        except:
-                            pass
-                    _global_pool.instances.clear()
-            except Exception as e:
-                self.logger.debug(f"关闭浏览器池时出错: {e}")
-
-            # 强制杀死所有Chrome进程
-            try:
-                import psutil
-                for proc in psutil.process_iter(['name']):
-                    try:
-                        if 'chrome' in proc.info['name'].lower():
-                            proc.kill()
-                    except:
-                        pass
-            except:
-                pass
-
+            # 调用统一的资源清理方法
+            self._cleanup_all_resources()
         except Exception as e:
             self.logger.error(f"关闭窗口时出错: {e}")
 
-        # 立即接受关闭事件，不等待
+        # 接受关闭事件
         event.accept()
 
         # 强制退出
