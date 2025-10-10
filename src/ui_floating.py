@@ -166,12 +166,12 @@ class FloatingMonitor(QMainWindow):
             return False
 
     def init_ui(self):
-        """初始化UI - 完全仿照原版"""
+        """初始化UI - 紧凑版布局"""
         self.setWindowTitle("余额监控")
 
-        # 窗口大小设置
+        # 窗口大小设置 - 进一步缩小高度，只显示3行
         self.collapsed_size = (50, 50)
-        self.expanded_size = (320, 350)  # 增加高度以容纳退出按钮
+        self.expanded_size = (320, 200)  # 大幅缩小高度
         self.setFixedSize(*self.expanded_size)
 
         # 存储总余额用于收缩态显示
@@ -199,18 +199,18 @@ class FloatingMonitor(QMainWindow):
         self.content_widget.setObjectName("content")
         main_layout.addWidget(self.content_widget)
 
-        # 内容布局
+        # 内容布局 - 减小边距和间距
         layout = QVBoxLayout(self.content_widget)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 8, 8, 8)  # 15→8 节省空间
+        layout.setSpacing(4)  # 8→4 节省高度
 
-        # 设置原版样式
+        # 设置紧凑版样式
         self.setStyleSheet("""
             #content {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 rgba(20, 20, 30, 230),
                     stop:1 rgba(30, 30, 45, 230));
-                border-radius: 25px;
+                border-radius: 20px;
                 border: 1px solid rgba(100, 100, 255, 0.2);
             }
             #content:hover {
@@ -221,12 +221,12 @@ class FloatingMonitor(QMainWindow):
                     stop:0 #5555ff,
                     stop:1 #8855ff);
                 border: none;
-                border-radius: 18px;
+                border-radius: 12px;
                 color: white;
-                font-size: 13px;
+                font-size: 11px;
                 font-weight: bold;
-                padding: 8px;
-                min-height: 25px;
+                padding: 4px 8px;
+                min-height: 18px;
             }
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
@@ -241,13 +241,13 @@ class FloatingMonitor(QMainWindow):
             QTableWidget {
                 background: rgba(20, 20, 30, 100);
                 border: 1px solid rgba(100, 100, 255, 0.1);
-                border-radius: 8px;
+                border-radius: 6px;
                 color: #e0e0e0;
                 gridline-color: rgba(100, 100, 255, 0.05);
                 selection-background-color: rgba(100, 100, 255, 0.3);
             }
             QTableWidget::item {
-                padding: 4px;
+                padding: 2px;
                 border: none;
             }
             QTableWidget::item:selected {
@@ -257,27 +257,27 @@ class FloatingMonitor(QMainWindow):
                 background: rgba(40, 40, 60, 180);
                 color: #c0c0ff;
                 border: none;
-                padding: 4px;
-                font-size: 12px;
+                padding: 2px;
+                font-size: 10px;
                 font-weight: bold;
             }
             QTextEdit {
                 background: rgba(15, 15, 25, 80);
                 border: none;
                 color: #a0a0d0;
-                font-size: 9px;
-                padding: 3px;
-                line-height: 1.4;
+                font-size: 8px;
+                padding: 2px;
+                line-height: 1.3;
             }
             QScrollBar:vertical {
                 background: rgba(20, 20, 30, 50);
-                width: 8px;
-                border-radius: 4px;
+                width: 6px;
+                border-radius: 3px;
             }
             QScrollBar::handle:vertical {
                 background: rgba(100, 100, 255, 0.3);
-                border-radius: 4px;
-                min-height: 20px;
+                border-radius: 3px;
+                min-height: 15px;
             }
             QScrollBar::handle:vertical:hover {
                 background: rgba(100, 100, 255, 0.5);
@@ -297,9 +297,9 @@ class FloatingMonitor(QMainWindow):
             }
             QMenu::item {
                 color: #e0e0e0;
-                padding: 6px 18px;
+                padding: 5px 15px;
                 border-radius: 3px;
-                margin: 2px 4px;
+                margin: 2px 3px;
             }
             QMenu::item:selected {
                 background: rgba(100, 100, 255, 0.3);
@@ -307,7 +307,7 @@ class FloatingMonitor(QMainWindow):
             QMenu::separator {
                 height: 1px;
                 background: rgba(100, 100, 255, 0.1);
-                margin: 4px 8px;
+                margin: 3px 6px;
             }
         """)
 
@@ -317,7 +317,7 @@ class FloatingMonitor(QMainWindow):
         self.collapsed_label.setStyleSheet("""
             QLabel {
                 color: #e0e0ff;
-                font-size: 14px;
+                font-size: 13px;
                 font-weight: bold;
                 background: transparent;
             }
@@ -325,73 +325,16 @@ class FloatingMonitor(QMainWindow):
         self.collapsed_label.hide()
         layout.addWidget(self.collapsed_label)
 
-        # 查询按钮
-        self.btn = QPushButton("查 询")
+        # 按钮行 - 查询和退出并排
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(4)
+
+        self.btn = QPushButton("查询")
         self.btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn.clicked.connect(self.query)
-        layout.addWidget(self.btn)
+        btn_layout.addWidget(self.btn)
 
-        # 环境变量状态显示
-        self.env_label = QLabel("Claude配置: 检测中...")
-        self.env_label.setStyleSheet("font-size: 10px; color: #7070a0; padding: 2px;")
-        layout.addWidget(self.env_label)
-
-        # 表格
-        self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["用户", "余额", "状态"])
-        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self.show_context_menu)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setAlternatingRowColors(True)
-
-        # 设置列宽
-        header = self.table.horizontalHeader()
-        header.setStretchLastSection(True)
-
-        layout.addWidget(self.table)
-
-        # 创建进度文本框（初始隐藏）
-        self.progress_text = QTextEdit()
-        self.progress_text.setReadOnly(True)
-        self.progress_text.setPlaceholderText("查询进度...")
-        self.progress_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.progress_text.hide()  # 初始隐藏
-        layout.addWidget(self.progress_text)
-
-        # 添加切换进度按钮
-        self.toggle_btn = QPushButton("▼ 进度")
-        self.toggle_btn.setMaximumWidth(70)
-        self.toggle_btn.setMaximumHeight(20)
-        self.toggle_btn.clicked.connect(self.toggle_progress)
-        self.toggle_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(60, 60, 80, 100);
-                border: none;
-                border-radius: 3px;
-                color: #a0a0c0;
-                font-size: 9px;
-                padding: 2px;
-            }
-            QPushButton:hover {
-                background: rgba(80, 80, 100, 150);
-            }
-        """)
-        layout.addWidget(self.toggle_btn)
-
-        # 总余额显示
-        self.total_label = QLabel("总余额: --")
-        self.total_label.setStyleSheet("""
-            font-size: 12px;
-            color: #90d090;
-            padding: 4px;
-            font-weight: bold;
-        """)
-        self.total_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.total_label)
-
-        # 退出按钮
-        self.quit_btn = QPushButton("退 出")
+        self.quit_btn = QPushButton("退出")
         self.quit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.quit_btn.clicked.connect(self.force_quit)
         self.quit_btn.setStyleSheet("""
@@ -400,12 +343,12 @@ class FloatingMonitor(QMainWindow):
                     stop:0 #ff5555,
                     stop:1 #ff8855);
                 border: none;
-                border-radius: 15px;
+                border-radius: 12px;
                 color: white;
-                font-size: 11px;
+                font-size: 10px;
                 font-weight: bold;
-                padding: 6px;
-                min-height: 20px;
+                padding: 4px 8px;
+                min-height: 18px;
             }
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
@@ -418,7 +361,85 @@ class FloatingMonitor(QMainWindow):
                     stop:1 #ee7744);
             }
         """)
-        layout.addWidget(self.quit_btn)
+        btn_layout.addWidget(self.quit_btn)
+
+        layout.addLayout(btn_layout)
+
+        # 环境变量状态显示 - 精简
+        self.env_label = QLabel("Claude: 检测中...")
+        self.env_label.setStyleSheet("font-size: 8px; color: #7070a0; padding: 1px;")
+        layout.addWidget(self.env_label)
+
+        # 表格 - 固定高度只显示3行
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["用户", "余额", "状态"])
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+
+        # 设置固定高度只显示3行
+        # 表头约18px + 3行×18px = 72px
+        self.table.setMaximumHeight(108)
+        self.table.setMinimumHeight(108)
+
+        # 设置行高
+        self.table.verticalHeader().setDefaultSectionSize(18)
+
+        # 设置列宽
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(True)
+        header.setMinimumSectionSize(40)  # 最小列宽
+
+        layout.addWidget(self.table)
+
+        # 创建进度文本框（初始隐藏）- 同样限制高度
+        self.progress_text = QTextEdit()
+        self.progress_text.setReadOnly(True)
+        self.progress_text.setPlaceholderText("查询进度...")
+        self.progress_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.progress_text.setMaximumHeight(72)
+        self.progress_text.setMinimumHeight(72)
+        self.progress_text.hide()
+        layout.addWidget(self.progress_text)
+
+        # 底部控制行 - 切换按钮和总余额
+        bottom_layout = QHBoxLayout()
+        bottom_layout.setSpacing(4)
+
+        # 添加切换进度按钮
+        self.toggle_btn = QPushButton("▼进度")
+        self.toggle_btn.setMaximumWidth(50)
+        self.toggle_btn.setMaximumHeight(16)
+        self.toggle_btn.clicked.connect(self.toggle_progress)
+        self.toggle_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(60, 60, 80, 100);
+                border: none;
+                border-radius: 3px;
+                color: #a0a0c0;
+                font-size: 8px;
+                padding: 1px 3px;
+            }
+            QPushButton:hover {
+                background: rgba(80, 80, 100, 150);
+            }
+        """)
+        bottom_layout.addWidget(self.toggle_btn)
+
+        # 总余额显示
+        self.total_label = QLabel("总余额: --")
+        self.total_label.setStyleSheet("""
+            font-size: 10px;
+            color: #90d090;
+            padding: 2px;
+            font-weight: bold;
+        """)
+        self.total_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        bottom_layout.addWidget(self.total_label)
+
+        layout.addLayout(bottom_layout)
 
         # 设置初始位置（右侧中央偏下）
         screen = QApplication.primaryScreen().availableGeometry()
@@ -472,13 +493,13 @@ class FloatingMonitor(QMainWindow):
                 # 切换回表格视图
                 self.progress_text.hide()
                 self.table.show()
-                self.toggle_btn.setText("▼ 进度")
+                self.toggle_btn.setText("▼进度")
                 self.logger.debug("切换到表格视图")
             else:
                 # 切换到进度视图
                 self.progress_text.show()
                 self.table.hide()
-                self.toggle_btn.setText("▲ 账号")
+                self.toggle_btn.setText("▲账号")
                 self.logger.debug("切换到进度视图")
         except Exception as e:
             self.logger.error(f"切换视图失败: {e}")
@@ -516,7 +537,7 @@ class FloatingMonitor(QMainWindow):
             self.add_progress(f"✗ 复制失败: {str(e)}")
 
     def update_env_status_display(self):
-        """更新Claude配置状态显示"""
+        """更新Claude配置状态显示 - 精简版"""
         if self.current_env_token:
             # 查找对应的用户名
             current_user = "未知"
@@ -525,9 +546,10 @@ class FloatingMonitor(QMainWindow):
                     current_user = account.username
                     break
 
-            env_text = f"Claude配置: {current_user} ({self.current_env_token[:15]}...)"
+            # 精简显示，只显示用户名
+            env_text = f"Claude: {current_user}"
         else:
-            env_text = "Claude配置: 未设置"
+            env_text = "Claude: 未设置"
 
         self.env_label.setText(env_text)
 
@@ -635,11 +657,11 @@ class FloatingMonitor(QMainWindow):
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QTextEdit
         from PyQt6.QtCore import Qt, QTimer
 
-        # 创建对话框
+        # 创建对话框 - 紧凑尺寸
         dialog = QDialog(self)
         dialog.setWindowTitle("正在退出")
         dialog.setModal(True)
-        dialog.setFixedSize(280, 150)
+        dialog.setFixedSize(260, 180)  # 更紧凑的尺寸
 
         # 无边框，置顶
         dialog.setWindowFlags(
@@ -648,39 +670,40 @@ class FloatingMonitor(QMainWindow):
             Qt.WindowType.Dialog
         )
 
-        # 设置样式
+        # 设置样式 - 紧凑版本
         dialog.setStyleSheet("""
             QDialog {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 rgba(25, 25, 35, 245),
                     stop:1 rgba(35, 35, 50, 245));
-                border-radius: 20px;
+                border-radius: 12px;
                 border: 2px solid rgba(120, 120, 255, 0.5);
             }
             QLabel#title {
                 color: #e0e0ff;
-                font-size: 16px;
+                font-size: 12px;
                 font-weight: bold;
                 background: transparent;
-                padding: 10px;
+                padding: 4px;
             }
             QTextEdit {
                 background: rgba(15, 15, 25, 150);
                 border: 1px solid rgba(80, 80, 120, 0.3);
-                border-radius: 8px;
+                border-radius: 6px;
                 color: #b0b0e0;
-                font-size: 10px;
+                font-size: 8px;
                 font-family: 'Consolas', 'Monaco', monospace;
-                padding: 8px;
+                padding: 4px;
+                line-height: 1.2;
             }
         """)
 
         layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(15)
+        layout.setContentsMargins(12, 10, 12, 10)  # 减小内边距
+        layout.setSpacing(8)  # 减小间距
 
-        # 标题
-        title_label = QLabel("正在清理资源并退出...")
+        # 标题 - 更简洁
+        title_label = QLabel("清理资源中...")
         title_label.setObjectName("title")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title_label)
@@ -689,6 +712,7 @@ class FloatingMonitor(QMainWindow):
         progress_text = QTextEdit()
         progress_text.setReadOnly(True)
         progress_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        progress_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout.addWidget(progress_text)
 
         # 保存对话框引用
@@ -713,7 +737,7 @@ class FloatingMonitor(QMainWindow):
     def _add_cleanup_log(self, message: str, level: str = "info"):
         """添加清理日志到对话框"""
         from datetime import datetime
-        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # 毫秒级时间戳
+        timestamp = datetime.now().strftime("%H:%M:%S")  # 去掉毫秒
 
         # 根据级别设置颜色
         color_map = {
@@ -725,7 +749,7 @@ class FloatingMonitor(QMainWindow):
         }
         color = color_map.get(level, "#b0b0e0")
 
-        # 添加带颜色的HTML格式文本
+        # 添加带颜色的HTML格式文本 - 紧凑格式
         html = f'<span style="color: {color};">[{timestamp}] {message}</span>'
         self.cleanup_progress_text.append(html)
 
@@ -741,9 +765,9 @@ class FloatingMonitor(QMainWindow):
         """启动清理序列，逐步执行并显示进度"""
         from PyQt6.QtCore import QTimer
 
-        self._add_cleanup_log("=" * 60, "info")
+        self._add_cleanup_log("="*40, "info")  # 减少分隔线长度
         self._add_cleanup_log("开始清理资源...", "info")
-        self._add_cleanup_log("=" * 60, "info")
+        self._add_cleanup_log("="*40, "info")
 
         # 步骤1: 停止计时器
         QTimer.singleShot(50, self._cleanup_step1_timers)
@@ -752,73 +776,70 @@ class FloatingMonitor(QMainWindow):
         """清理步骤1: 停止计时器"""
         from PyQt6.QtCore import QTimer
 
-        self._add_cleanup_log("► 步骤 1/5: 停止计时器", "info")
+        self._add_cleanup_log("► 1/5: 停止计时器", "info")  # 更简洁的步骤标题
         try:
             if hasattr(self, 'hover_timer') and self.hover_timer:
                 self.hover_timer.stop()
-                self._add_cleanup_log("  ✓ 悬停计时器已停止", "success")
+                self._add_cleanup_log("  ✓ 已停止", "success")
             else:
-                self._add_cleanup_log("  - 没有活动的计时器", "debug")
+                self._add_cleanup_log("  - 无计时器", "debug")
         except Exception as e:
-            self._add_cleanup_log(f"  ✗ 停止计时器失败: {e}", "error")
+            self._add_cleanup_log(f"  ✗ 失败: {e}", "error")
 
-        QTimer.singleShot(100, self._cleanup_step2_worker)
+        QTimer.singleShot(80, self._cleanup_step2_worker)  # 减少等待时间
 
     def _cleanup_step2_worker(self):
         """清理步骤2: 终止工作线程"""
         from PyQt6.QtCore import QTimer
 
-        self._add_cleanup_log("► 步骤 2/5: 终止工作线程", "info")
+        self._add_cleanup_log("► 2/5: 终止工作线程", "info")
         try:
             if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
-                self._add_cleanup_log("  - 检测到运行中的工作线程", "debug")
+                self._add_cleanup_log("  - 发现运行中线程", "debug")
                 self.worker.terminate()
-                self._add_cleanup_log("  - 发送终止信号...", "debug")
-
                 if self.worker.wait(1000):
-                    self._add_cleanup_log("  ✓ 工作线程已终止", "success")
+                    self._add_cleanup_log("  ✓ 已终止", "success")
                 else:
-                    self._add_cleanup_log("  ⚠ 工作线程未响应，强制结束", "warning")
+                    self._add_cleanup_log("  ⚠ 强制结束", "warning")
             else:
-                self._add_cleanup_log("  - 没有运行中的工作线程", "debug")
+                self._add_cleanup_log("  - 无线程", "debug")
         except Exception as e:
-            self._add_cleanup_log(f"  ✗ 终止线程失败: {e}", "error")
+            self._add_cleanup_log(f"  ✗ 失败: {e}", "error")
 
-        QTimer.singleShot(150, self._cleanup_step3_browser_pool)
+        QTimer.singleShot(100, self._cleanup_step3_browser_pool)
 
     def _cleanup_step3_browser_pool(self):
         """清理步骤3: 清理浏览器池"""
         from PyQt6.QtCore import QTimer
 
-        self._add_cleanup_log("► 步骤 3/5: 清理浏览器池", "info")
+        self._add_cleanup_log("► 3/5: 清理浏览器池", "info")
         try:
             from src.browser_pool import _global_pool
             if _global_pool and _global_pool.instances:
-                instance_count = len(_global_pool.instances)
-                self._add_cleanup_log(f"  - 发现 {instance_count} 个浏览器实例", "debug")
+                count = len(_global_pool.instances)
+                self._add_cleanup_log(f"  - 发现 {count} 个实例", "debug")
 
                 for idx, instance in enumerate(_global_pool.instances):
                     try:
-                        self._add_cleanup_log(f"  - 正在关闭实例 {idx+1}/{instance_count}...", "debug")
                         instance.driver.quit()
-                        self._add_cleanup_log(f"  ✓ 实例 {idx+1} 已关闭", "success")
+                        self._add_cleanup_log(f"  ✓ 实例 {idx+1}/{count}", "success")
                     except Exception as e:
-                        self._add_cleanup_log(f"  ⚠ 实例 {idx+1} 关闭失败: {e}", "warning")
+                        self._add_cleanup_log(f"  ⚠ 实例 {idx+1} 失败", "warning")
 
                 _global_pool.instances.clear()
-                self._add_cleanup_log(f"  ✓ 浏览器池已清空", "success")
+                self._add_cleanup_log(f"  ✓ 已清空", "success")
             else:
-                self._add_cleanup_log("  - 浏览器池为空", "debug")
+                self._add_cleanup_log("  - 池为空", "debug")
         except Exception as e:
-            self._add_cleanup_log(f"  ✗ 清理浏览器池失败: {e}", "error")
+            self._add_cleanup_log(f"  ✗ 失败: {e}", "error")
 
-        QTimer.singleShot(200, self._cleanup_step4_chrome_processes)
+        QTimer.singleShot(150, self._cleanup_step4_chrome_processes)
 
     def _cleanup_step4_chrome_processes(self):
         """清理步骤4: 清理Chrome进程"""
         from PyQt6.QtCore import QTimer
 
-        self._add_cleanup_log("► 步骤 4/5: 清理Chrome进程", "info")
+        self._add_cleanup_log("► 4/5: 清理Chrome进程", "info")
         try:
             import psutil
             import subprocess
@@ -827,58 +848,58 @@ class FloatingMonitor(QMainWindow):
 
             # Windows使用taskkill
             if os.name == 'nt':
-                self._add_cleanup_log("  - 使用taskkill清理Chrome进程...", "debug")
+                self._add_cleanup_log("  - 运行taskkill...", "debug")
                 try:
                     result = subprocess.run(
                         ['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
                         capture_output=True, timeout=2, text=True
                     )
                     if result.returncode == 0:
-                        self._add_cleanup_log("  ✓ taskkill已终止chrome.exe", "success")
+                        self._add_cleanup_log("  ✓ chrome.exe", "success")
 
                     result = subprocess.run(
                         ['taskkill', '/F', '/IM', 'chromedriver.exe', '/T'],
                         capture_output=True, timeout=2, text=True
                     )
                     if result.returncode == 0:
-                        self._add_cleanup_log("  ✓ taskkill已终止chromedriver.exe", "success")
+                        self._add_cleanup_log("  ✓ chromedriver.exe", "success")
                 except Exception as e:
-                    self._add_cleanup_log(f"  ⚠ taskkill失败: {e}", "warning")
+                    self._add_cleanup_log(f"  ⚠ taskkill失败", "warning")
 
             # 使用psutil扫描残留进程
-            self._add_cleanup_log("  - 扫描残留的Chrome进程...", "debug")
+            self._add_cleanup_log("  - 扫描残留...", "debug")
             for proc in psutil.process_iter(['name', 'pid']):
                 try:
                     name = proc.info['name'].lower()
                     if 'chrome' in name or 'chromedriver' in name:
                         proc.kill()
                         killed_count += 1
-                        self._add_cleanup_log(f"  ✓ 已终止: {proc.info['name']} (PID: {proc.info['pid']})", "success")
+                        self._add_cleanup_log(f"  ✓ PID:{proc.info['pid']}", "success")
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
 
             if killed_count > 0:
-                self._add_cleanup_log(f"  ✓ 共清理 {killed_count} 个Chrome相关进程", "success")
+                self._add_cleanup_log(f"  ✓ 清理 {killed_count} 个进程", "success")
             else:
-                self._add_cleanup_log("  - 没有发现需要清理的进程", "debug")
+                self._add_cleanup_log("  - 无残留", "debug")
 
         except Exception as e:
-            self._add_cleanup_log(f"  ✗ 清理Chrome进程失败: {e}", "error")
+            self._add_cleanup_log(f"  ✗ 失败: {e}", "error")
 
-        QTimer.singleShot(200, self._cleanup_step5_finalize)
+        QTimer.singleShot(150, self._cleanup_step5_finalize)
 
     def _cleanup_step5_finalize(self):
         """清理步骤5: 完成清理"""
         from PyQt6.QtCore import QTimer
 
-        self._add_cleanup_log("► 步骤 5/5: 完成清理", "info")
-        self._add_cleanup_log("=" * 60, "info")
-        self._add_cleanup_log("✓ 所有资源清理完成", "success")
-        self._add_cleanup_log("程序即将退出...", "info")
-        self._add_cleanup_log("=" * 60, "info")
+        self._add_cleanup_log("► 5/5: 完成", "info")
+        self._add_cleanup_log("="*40, "info")
+        self._add_cleanup_log("✓ 清理完成", "success")
+        self._add_cleanup_log("正在退出...", "info")
+        self._add_cleanup_log("="*40, "info")
 
-        # 等待1秒让用户看到完成消息
-        QTimer.singleShot(1000, self._do_final_exit)
+        # 等待800ms让用户看到完成消息
+        QTimer.singleShot(800, self._do_final_exit)
 
     def _do_final_exit(self):
         """最终退出"""
