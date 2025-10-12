@@ -1,0 +1,10 @@
+{
+  "question": "How does ui_floating.py manage Claude tokens and where should OpenAI token logic hook in?",
+  "analysis": {
+    "load": "_load_current_token reads Path.home() / '.claude' / 'settings.json', expects JSON {'env': {'ANTHROPIC_AUTH_TOKEN': '...'}} and stores result in self.current_env_token during __init__.",
+    "save": "_save_token_to_claude_settings ensures parent dir exists, loads existing JSON, ensures env dict, writes new ANTHROPIC_AUTH_TOKEN, using ensure_ascii=False for Chinese compatibility.",
+    "ui": "set_env_token updates file via _save_token..., sets self.current_env_token, refreshes table display and env label, logs to progress view. refresh_user_display prefixes current account username with marker, while update_env_status_display sets self.env_label text to 'Claude: <username>'.",
+    "hook_point": "Add symmetric helpers for OpenAI: store Path.home() / '.codex' / 'auth.json', load initial key, save updates, adjust context menu (new QAction) and UI status label to reflect both tokens."
+  },
+  "status": "resolved"
+}

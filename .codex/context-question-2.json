@@ -1,0 +1,9 @@
+﻿{
+  "question": "OpenAI key 如何在 UI 标记？",
+  "finding": "账号表格在 `load_accounts` 与 `refresh_user_display` 中，通过 `display_name = f"\u25cf {account.username}"` 为当前 env token 添加黑色圆点前缀，同时 `env_label` 显示 "Claude: {user}"。可复用同一视觉模式。",
+  "code_refs": [
+    "src/ui_floating.py:471",
+    "src/ui_floating.py:651",
+    "src/ui_floating.py:525"
+  ]
+}

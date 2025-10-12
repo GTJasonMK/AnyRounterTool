@@ -1,0 +1,39 @@
+{
+  "位置": {
+    "模块": "src/ui_floating.py",
+    "类或函数": [
+      "FloatingMonitor._load_current_token",
+      "FloatingMonitor._save_token_to_claude_settings",
+      "FloatingMonitor._resolve_codex_auth_path",
+      "FloatingMonitor._discover_wsl_codex_paths",
+      "FloatingMonitor.set_openai_key"
+    ]
+  },
+  "现状": {
+    "描述": "悬浮窗 UI 负责读取/写入 Claude 与 OpenAI Key，目前已支持 Windows 主目录下 `.codex/auth.json` 的读写。",
+    "相似案例": [
+      "Claude Token 路径解析与写入逻辑",
+      "账号表格标记当前使用的 Key"
+    ]
+  },
+  "技术栈": {
+    "语言": "Python 3",
+    "框架": ["PyQt6"],
+    "依赖": ["pathlib", "json", "logging", "os"]
+  },
+  "测试": {
+    "已有测试": [],
+    "验证方式": "通过 `python3 -m compileall` 做语法检查，GUI 功能需手动冒烟。"
+  },
+  "观察报告": {
+    "发现": [
+      "目前仅处理本地主目录路径，无法自动找到 WSL 共享下的 auth.json。"
+    ],
+    "信息不足": [
+      "WSL 中可能存在多个发行版或用户目录，需要合理的遍历策略并控制性能。"
+    ],
+    "建议深入方向": [
+      "实现候选路径解析与缓存，包含环境变量覆盖、默认路径和 WSL 枚举。"
+    ]
+  }
+}

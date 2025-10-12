@@ -9,7 +9,8 @@ import sys
 import json
 import logging
 import subprocess
-from typing import Optional, List
+from concurrent.futures import ThreadPoolExecutor, wait
+from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 from pathlib import Path
 
@@ -75,11 +76,13 @@ class FloatingMonitor(QMainWindow):
         self.hover_timer.timeout.connect(self.start_collapse)
         self.collapsed_center = None  # 记忆小圆圈的中心点
 
-        # Claude配置文件路径
+        # 配置文件路径
         self.claude_settings_path = Path.home() / ".claude" / "settings.json"
+        self.codex_auth_path = self._resolve_codex_auth_path()
 
-        # 从Claude配置文件读取当前Token
+        # 读取当前外部配置
         self.current_env_token = self._load_current_token()
+        self.current_openai_key = self._load_current_openai_key()
 
         # 初始化UI
         self.init_ui()
@@ -131,6 +134,266 @@ class FloatingMonitor(QMainWindow):
             self.logger.error(f"读取Claude配置文件失败: {e}")
             return ""
 
+    def _resolve_codex_auth_path(self) -> Path:
+        """解析Codex配置路径，兼容 Windows 与 WSL"""
+        self.local_codex_paths: List[Path] = []
+
+        env_override = os.environ.get("CODEX_AUTH_PATH")
+        if env_override:
+            self.local_codex_paths.append(Path(env_override).expanduser())
+
+        default_path = Path.home() / ".codex" / "auth.json"
+        self.local_codex_paths.append(default_path)
+
+        # 去除本地路径重复
+        unique_local = []
+        local_seen = set()
+        for path in self.local_codex_paths:
+            normalized = str(path)
+            if normalized in local_seen:
+                continue
+            local_seen.add(normalized)
+            unique_local.append(path)
+        self.local_codex_paths = unique_local
+
+        # 枚举 WSL 目标
+        self.wsl_targets = self._discover_wsl_codex_targets()
+
+        candidates: List[Path] = list(self.local_codex_paths)
+        for target in self.wsl_targets:
+            candidates.append(target["windows_path"])
+
+        unique_candidates: List[Path] = []
+        visited = set()
+        for path in candidates:
+            normalized = str(path)
+            if normalized in visited:
+                continue
+            visited.add(normalized)
+            unique_candidates.append(path)
+
+        if not unique_candidates:
+            self.logger.warning("未找到Codex配置候选路径，将使用默认路径: %s", default_path)
+            self.local_codex_paths = [default_path]
+            return default_path
+
+        for path in unique_candidates:
+            try:
+                if path.exists():
+                    self.logger.info(f"检测到Codex配置文件: {path}")
+                    return path
+            except Exception as e:
+                self.logger.debug(f"检测Codex配置路径失败: {path} - {e}")
+
+        fallback = unique_candidates[0]
+        self.logger.info(f"未发现现有Codex配置文件，使用候选路径: {fallback}")
+        return fallback
+
+    def _decode_wsl_output(self, data: Optional[bytes]) -> str:
+        if not data:
+            return ""
+
+        for encoding in ("utf-16-le", "utf-8", "gbk"):
+            try:
+                return data.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+
+        return data.decode("utf-8", errors="ignore")
+
+    def _run_wsl_command(self, args: List[str], timeout: int = 5) -> Tuple[int, str, str]:
+        try:
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=False,
+                check=False,
+                timeout=timeout
+            )
+        except FileNotFoundError:
+            raise
+        except Exception as e:
+            raise RuntimeError(str(e)) from e
+
+        stdout = self._decode_wsl_output(result.stdout)
+        stderr = self._decode_wsl_output(result.stderr)
+        return result.returncode, stdout, stderr
+
+    def _discover_wsl_codex_targets(self) -> List[Dict[str, Any]]:
+        """枚举WSL目录下可能存在的Codex配置路径"""
+        targets: List[Dict[str, Any]] = []
+
+        if os.name != "nt":
+            return targets
+
+        try:
+            returncode, stdout, stderr = self._run_wsl_command(["wsl.exe", "-l", "-q"], timeout=5)
+        except FileNotFoundError:
+            self.logger.debug("当前系统未安装 wsl.exe，跳过 WSL 路径枚举")
+            return targets
+        except Exception as e:
+            self.logger.debug(f"执行 wsl.exe 枚举失败: {e}")
+            return targets
+
+        if returncode != 0:
+            self.logger.debug(
+                "wsl.exe -l -q 返回错误，stdout=%s stderr=%s",
+                stdout.strip(),
+                stderr.strip()
+            )
+            return targets
+
+        normalized_stdout = stdout.replace('\x00', '').strip()
+
+        if not normalized_stdout:
+            self.logger.info("wsl.exe -l -q 未返回发行版列表")
+            return targets
+
+        distros = [line.strip("\ufeff \t") for line in normalized_stdout.splitlines() if line.strip()]
+        if not distros:
+            return targets
+
+        for distro in distros:
+            home_path = self._query_wsl_home(distro)
+            if not home_path:
+                continue
+
+            linux_file = home_path.rstrip('/') + "/.codex/auth.json"
+
+            windows_path = self._build_wsl_windows_path(distro, linux_file)
+
+            targets.append({
+                "distro": distro,
+                "home": home_path,
+                "windows_path": windows_path,
+                "linux_path": linux_file
+            })
+
+        if targets:
+            distro_summary = sorted({target["distro"] for target in targets if target.get("distro")})
+            self.logger.info(
+                "检测到 %d 个WSL Codex目标: %s",
+                len(targets),
+                ", ".join(distro_summary)
+            )
+        else:
+            self.logger.info("未检测到任何WSL发行版的Codex目标")
+
+        return targets
+
+    def _build_wsl_windows_path(self, distro: str, linux_file: str) -> Path:
+        preferred_roots = [Path(r"\\wsl.localhost"), Path(r"\\wsl$")]
+        chosen_root: Optional[Path] = None
+
+        for root in preferred_roots:
+            base = root / distro
+            try:
+                if base.exists():
+                    chosen_root = root
+                    break
+            except OSError:
+                continue
+
+        if chosen_root is None:
+            chosen_root = preferred_roots[0]
+
+        windows_path = chosen_root / distro
+        for part in linux_file.split('/'):
+            if part:
+                windows_path /= part
+
+        return windows_path
+
+    def _read_openai_key_from_wsl(self, target: Dict[str, Any]) -> str:
+        """通过 wsl.exe 从发行版读取 OpenAI Key"""
+        distro = target.get("distro")
+        linux_path = target.get("linux_path")
+        if not distro or not linux_path:
+            return ""
+
+        script = f"if [ -f '{linux_path}' ]; then cat '{linux_path}'; fi"
+
+        try:
+            returncode, stdout, stderr = self._run_wsl_command(
+                ["wsl.exe", "-d", distro, "-e", "sh", "-lc", script],
+                timeout=5
+            )
+        except FileNotFoundError:
+            self.logger.debug("wsl.exe 不存在，无法读取WSL配置")
+            return ""
+        except Exception as e:
+            self.logger.debug(f"读取 WSL 配置失败: {distro} - {e}")
+            return ""
+
+        if returncode != 0 or not stdout.strip():
+            return ""
+
+        try:
+            settings = json.loads(stdout)
+            return settings.get('OPENAI_API_KEY', '')
+        except json.JSONDecodeError as e:
+            self.logger.error(f"解析WSL Codex配置失败({distro}): {e}")
+        except Exception as e:
+            self.logger.error(f"读取WSL Codex配置失败({distro}): {e}")
+
+        return ""
+
+    def _query_wsl_home(self, distro: str) -> str:
+        """查询指定发行版的默认 HOME 路径"""
+        try:
+            returncode, stdout, stderr = self._run_wsl_command(
+                ["wsl.exe", "-d", distro, "-e", "sh", "-lc", "printf %s \"$HOME\""],
+                timeout=5
+            )
+        except FileNotFoundError:
+            self.logger.debug("wsl.exe 不存在，无法查询 HOME")
+            return ""
+        except Exception as e:
+            self.logger.debug(f"查询 WSL HOME 目录失败: {distro} - {e}")
+            return ""
+
+        if returncode != 0:
+            self.logger.debug(
+                "获取 WSL HOME 目录失败: %s stdout=%s stderr=%s",
+                distro,
+                stdout.strip(),
+                stderr.strip()
+            )
+            return ""
+
+        return stdout.replace('\x00', '').strip()
+
+    def _load_current_openai_key(self) -> str:
+        """从Codex配置文件加载当前OpenAI Key"""
+        # 尝试本地 Windows 路径
+        for path in getattr(self, "local_codex_paths", []):
+            try:
+                if not path.exists():
+                    continue
+
+                with open(path, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                    key = settings.get('OPENAI_API_KEY', '')
+                    if key:
+                        self.logger.info(f"从Codex配置加载OpenAI Key: {key[:15]}...")
+                        return key
+            except Exception as e:
+                self.logger.debug(f"读取Codex配置失败({path}): {e}")
+
+        # 尝试通过 WSL 读取
+        for target in getattr(self, "wsl_targets", []):
+            key = self._read_openai_key_from_wsl(target)
+            if key:
+                self.logger.info(
+                    "从WSL发行版加载OpenAI Key: %s (%s)",
+                    key[:15] + "...",
+                    target.get('distro', 'unknown')
+                )
+                return key
+
+        self.logger.warning("未读取到任何OpenAI Key")
+        return ""
+
     def _save_token_to_claude_settings(self, token: str) -> bool:
         """保存Token到Claude配置文件"""
         try:
@@ -164,6 +427,81 @@ class FloatingMonitor(QMainWindow):
         except Exception as e:
             self.logger.error(f"保存Token到Claude配置失败: {e}")
             return False
+
+    def _save_openai_key_to_codex_auth(self, token: str, target_path: Optional[Path] = None) -> Tuple[bool, str]:
+        """保存OpenAI Key到Codex配置文件"""
+        path = target_path or self.codex_auth_path
+        try:
+            # 确保目录存在
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+            # 读取现有配置
+            settings = {}
+            if path.exists():
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        settings = json.load(f)
+                except json.JSONDecodeError:
+                    self.logger.warning("Codex配置文件格式错误，将创建新配置")
+                    settings = {}
+
+            # 更新Key
+            settings['OPENAI_API_KEY'] = token
+
+            # 保存配置
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, indent=2, ensure_ascii=False)
+
+            self.logger.info(f"成功保存OpenAI Key到Codex配置文件: {path}")
+            return True, ""
+
+        except Exception as e:
+            self.logger.error(f"保存OpenAI Key到Codex配置失败: {e}")
+            return False, str(e)
+
+    def _save_openai_key_to_wsl(self, target: Dict[str, Any], token: str) -> Tuple[bool, str]:
+        """通过 wsl.exe 保存 OpenAI Key"""
+        distro = target.get("distro")
+        home_path = target.get("home")
+        linux_path = target.get("linux_path")
+        if not distro or not home_path or not linux_path:
+            return False, "WSL 目标信息不完整"
+
+        json_content = json.dumps({'OPENAI_API_KEY': token}, ensure_ascii=False, indent=2)
+        linux_dir = home_path.rstrip('/') + "/.codex"
+
+        script = (
+            f"mkdir -p '{linux_dir}' && cat <<'EOF' > '{linux_path}'\n"
+            f"{json_content}\nEOF"
+        )
+
+        try:
+            returncode, stdout, stderr = self._run_wsl_command(
+                ["wsl.exe", "-d", distro, "-e", "sh", "-lc", script],
+                timeout=10
+            )
+        except FileNotFoundError:
+            self.logger.error("wsl.exe 不存在，无法写入WSL配置")
+            return False, "wsl.exe 不存在"
+        except Exception as e:
+            self.logger.error(f"写入WSL Codex配置失败({distro}): {e}")
+            return False, str(e)
+
+        if returncode != 0:
+            self.logger.error(
+                "写入WSL Codex配置失败(%s): return=%s stderr=%s",
+                distro,
+                returncode,
+                stderr
+            )
+            return False, stderr or "执行命令失败"
+
+        self.logger.info(
+            "成功写入WSL Codex配置: %s (%s)",
+            linux_path,
+            distro
+        )
+        return True, ""
 
     def init_ui(self):
         """初始化UI - 紧凑版布局"""
@@ -366,7 +704,7 @@ class FloatingMonitor(QMainWindow):
         layout.addLayout(btn_layout)
 
         # 环境变量状态显示 - 精简
-        self.env_label = QLabel("Claude: 检测中...")
+        self.env_label = QLabel("Claude: 检测中... | OpenAI: 检测中...")
         self.env_label.setStyleSheet("font-size: 8px; color: #7070a0; padding: 1px;")
         layout.addWidget(self.env_label)
 
@@ -453,6 +791,25 @@ class FloatingMonitor(QMainWindow):
             initial_y + self.collapsed_size[1] // 2
         )
 
+    def _build_account_display_name(self, account: Account) -> str:
+        """构造账号显示名称，附带状态标记"""
+        markers: List[str] = []
+        if account.api_key and account.api_key == self.current_env_token:
+            markers.append("●")
+        if account.api_key and account.api_key == self.current_openai_key:
+            markers.append("◎")
+
+        if markers:
+            return f"{''.join(markers)} {account.username}"
+        return account.username
+
+    def _find_username_by_key(self, key: str) -> str:
+        """根据API Key查找用户名"""
+        for account in self.config.accounts:
+            if account.api_key == key:
+                return account.username
+        return "未知"
+
     def load_accounts(self):
         """加载账号列表"""
         try:
@@ -465,11 +822,7 @@ class FloatingMonitor(QMainWindow):
             self.table.setRowCount(len(accounts))
 
             for i, account in enumerate(accounts):
-                # 检查是否为当前环境变量使用的API key
-                display_name = account.username
-                if account.api_key and account.api_key == self.current_env_token:
-                    display_name = f"● {account.username}"
-
+                display_name = self._build_account_display_name(account)
                 self.table.setItem(i, 0, QTableWidgetItem(display_name))
                 self.table.setItem(i, 1, QTableWidgetItem("等待"))
                 self.table.setItem(i, 2, QTableWidgetItem("待机"))
@@ -538,19 +891,15 @@ class FloatingMonitor(QMainWindow):
 
     def update_env_status_display(self):
         """更新Claude配置状态显示 - 精简版"""
+        claude_user = "未设置"
         if self.current_env_token:
-            # 查找对应的用户名
-            current_user = "未知"
-            for account in self.config.accounts:
-                if account.api_key == self.current_env_token:
-                    current_user = account.username
-                    break
+            claude_user = self._find_username_by_key(self.current_env_token)
 
-            # 精简显示，只显示用户名
-            env_text = f"Claude: {current_user}"
-        else:
-            env_text = "Claude: 未设置"
+        openai_user = "未设置"
+        if self.current_openai_key:
+            openai_user = self._find_username_by_key(self.current_openai_key)
 
+        env_text = f"Claude: {claude_user} | OpenAI: {openai_user}"
         self.env_label.setText(env_text)
 
     def show_context_menu(self, position):
@@ -576,7 +925,7 @@ class FloatingMonitor(QMainWindow):
 
         # 复制API Key选项
         copy_action = QAction(f"复制 {username} 的API Key", self)
-        copy_action.triggered.connect(lambda: self.copy_apikey(apikey))
+        copy_action.triggered.connect(lambda checked=False, key=apikey: self.copy_apikey(key))
         menu.addAction(copy_action)
 
         # 分隔线
@@ -589,9 +938,24 @@ class FloatingMonitor(QMainWindow):
             env_action.setEnabled(False)  # 禁用，只用于显示状态
         else:
             env_action = QAction(f"设为Claude配置Token", self)
-            env_action.triggered.connect(lambda: self.set_env_token(username, apikey))
+            env_action.triggered.connect(
+                lambda checked=False, name=username, key=apikey: self.set_env_token(name, key)
+            )
 
         menu.addAction(env_action)
+
+        # 设置OpenAI配置选项
+        is_openai_current = apikey == self.current_openai_key
+        if is_openai_current:
+            openai_action = QAction("◎ 当前OpenAI配置", self)
+            openai_action.setEnabled(False)
+        else:
+            openai_action = QAction("设为OpenAI配置Key", self)
+            openai_action.triggered.connect(
+                lambda checked=False, name=username, key=apikey: self.set_openai_key(name, key)
+            )
+
+        menu.addAction(openai_action)
 
         # 显示菜单
         menu.exec(self.table.mapToGlobal(position))
@@ -643,14 +1007,119 @@ class FloatingMonitor(QMainWindow):
             self.add_progress(f"✗ 设置Claude配置失败: {str(e)}")
             return False
 
+    def set_openai_key(self, username, apikey):
+        """设置Codex配置文件中的OpenAI Key"""
+        try:
+            self.logger.info(f"正在为 {username} 设置OpenAI配置Key...")
+
+            # 每次操作前重新解析路径，确保捕获最新环境
+            self.codex_auth_path = self._resolve_codex_auth_path()
+
+            wsl_targets = getattr(self, "wsl_targets", [])
+            self.logger.debug(
+                "WSL 目标数量: %d", len(wsl_targets)
+            )
+            if wsl_targets:
+                self.add_progress(
+                    f"检测到 {len(wsl_targets)} 个WSL目标: "
+                    + ", ".join(sorted({t.get('distro', '?') for t in wsl_targets}))
+                )
+            else:
+                self.add_progress("未检测到可写入的WSL目标，将仅写入Windows路径")
+
+            results: List[Dict[str, Any]] = []
+
+            for path in getattr(self, "local_codex_paths", []):
+                success, error = self._save_openai_key_to_codex_auth(apikey, path)
+                results.append({
+                    "success": success,
+                    "label": f"Windows路径: {path}",
+                    "error": error,
+                    "path": str(path)
+                })
+
+            for target in getattr(self, "wsl_targets", []):
+                success, error = self._save_openai_key_to_wsl(target, apikey)
+                label = f"WSL[{target.get('distro', 'unknown')}]: {target.get('linux_path', '')}"
+                results.append({
+                    "success": success,
+                    "label": label,
+                    "error": error,
+                    "path": target.get('linux_path', '')
+                })
+
+            if not results:
+                QMessageBox.warning(
+                    self,
+                    "未写入",
+                    "未找到任何可写入的Codex配置目标，请检查环境配置。"
+                )
+                self.logger.warning("未找到可写入的Codex配置目标")
+                self.add_progress("✗ 设置OpenAI配置失败: 无可用目标")
+                return False
+
+            success_count = sum(1 for item in results if item['success'])
+
+            message_lines = [
+                f"账号: {username}",
+                f"Key: {apikey[:15]}...",
+                ""
+            ]
+
+            summary_parts = []
+            for item in results:
+                symbol = "✓" if item['success'] else "✗"
+                line = f"{symbol} {item['label']}"
+                if item['error']:
+                    line += f"\n   原因: {item['error']}"
+                message_lines.append(line)
+                summary_parts.append(f"{symbol}{item['label']}")
+                progress_line = f"{symbol} {item['label']}"
+                if item['error']:
+                    progress_line += f" | 原因: {item['error']}"
+                self.add_progress(progress_line)
+
+            message_text = "\n".join(message_lines)
+
+            if success_count > 0:
+                self.current_openai_key = apikey
+                self.refresh_user_display()
+                self.update_env_status_display()
+
+                QMessageBox.information(
+                    self,
+                    "OpenAI配置更新结果",
+                    message_text
+                )
+
+                self.logger.info(f"OpenAI配置更新完成: {username} ({success_count}/{len(results)})")
+                self.add_progress(f"OpenAI配置写入结果: {'; '.join(summary_parts)}")
+                return True
+
+            QMessageBox.critical(
+                self,
+                "设置失败",
+                message_text
+            )
+            self.logger.error(f"OpenAI配置设置失败: 未能写入任何目标 ({username})")
+            self.add_progress(f"✗ 设置OpenAI配置失败: {'; '.join(summary_parts)}")
+            return False
+
+        except Exception as e:
+            error_msg = f"OpenAI配置设置失败: {str(e)}"
+            QMessageBox.warning(self, "设置失败", error_msg)
+            self.logger.error(f"设置OpenAI配置失败: {e}", exc_info=True)
+            self.add_progress(f"✗ 设置OpenAI配置失败: {str(e)}")
+            return False
+
     def refresh_user_display(self):
         """刷新用户显示，更新环境变量标记"""
         for i, account in enumerate(self.config.accounts):
-            display_name = account.username
-            if account.api_key and account.api_key == self.current_env_token:
-                display_name = f"● {account.username}"
-
-            self.table.item(i, 0).setText(display_name)
+            item = self.table.item(i, 0)
+            if item is None:
+                item = QTableWidgetItem()
+                self.table.setItem(i, 0, item)
+            item.setText(self._build_account_display_name(account))
 
     def _show_closing_dialog(self):
         """显示退出动画对话框 - 在软件窗口正中央"""
@@ -929,12 +1398,15 @@ class FloatingMonitor(QMainWindow):
                 from src.browser_pool import _global_pool
                 if _global_pool:
                     self.logger.info(f"正在清理浏览器池 ({len(_global_pool.instances)} 个实例)...")
-                    for idx, instance in enumerate(_global_pool.instances):
-                        try:
-                            self.logger.debug(f"正在关闭浏览器实例 {idx+1}...")
-                            instance.driver.quit()
-                        except Exception as e:
-                            self.logger.debug(f"关闭浏览器实例 {idx+1} 失败: {e}")
+                    futures = []
+                    max_workers = min(8, max(1, len(_global_pool.instances)))
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        for idx, instance in enumerate(_global_pool.instances):
+                            futures.append(executor.submit(self._shutdown_browser_instance, idx, instance))
+                        done, not_done = wait(futures, timeout=5)
+                        for future in not_done:
+                            future.cancel()
+                            self.logger.debug("浏览器实例关闭超时，已取消任务")
                     _global_pool.instances.clear()
                     self.logger.info("浏览器池已清理")
             except Exception as e:
@@ -999,6 +1471,33 @@ class FloatingMonitor(QMainWindow):
 
         except Exception as e:
             self.logger.error(f"清理资源时发生错误: {e}")
+
+    def _shutdown_browser_instance(self, idx: int, instance: Any):
+        """并行关闭浏览器实例"""
+        try:
+            self.logger.debug(f"正在关闭浏览器实例 {idx+1}...")
+
+            driver = getattr(instance, 'driver', None)
+            service = getattr(driver, 'service', None)
+
+            # 优先直接终止 Chromedriver 进程，避免 quit 阻塞
+            if service is not None:
+                proc = getattr(service, 'process', None)
+                if proc is not None and proc.poll() is None:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=2)
+                        self.logger.debug(f"已终止 Chromedriver 进程 (实例 {idx+1})")
+                    except Exception as kill_err:
+                        self.logger.debug(f"终止 Chromedriver 进程失败 (实例 {idx+1}): {kill_err}")
+
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception as quit_err:
+                    self.logger.debug(f"调用 driver.quit() 失败 (实例 {idx+1}): {quit_err}")
+        except Exception as e:
+            self.logger.debug(f"关闭浏览器实例 {idx+1} 失败: {e}")
 
     def _do_force_quit(self):
         """执行强制退出"""
@@ -1093,7 +1592,10 @@ class FloatingMonitor(QMainWindow):
         for i in range(self.table.rowCount()):
             # 检查用户名（可能带有●标记）
             current_display = self.table.item(i, 0).text()
-            actual_username = current_display.replace("● ", "")  # 移除标记获取真实用户名
+            actual_username = current_display
+            for marker in ("●", "◎"):
+                actual_username = actual_username.replace(marker, "")
+            actual_username = actual_username.strip()
 
             if actual_username == user:
                 self.table.item(i, 1).setText(balance)

@@ -1,0 +1,9 @@
+{
+  "问题": "如何定位 WSL 下的 `.codex/auth.json`？",
+  "结论": "在 Windows 环境中可通过 UNC 路径 `\\\\wsl.localhost\\` 枚举 WSL 发行版目录，并在 `home/<user>/.codex/auth.json` 中寻找配置文件。选取第一个找到的文件，若存在多个发行版则按照发行版名称排序以获得稳定结果。",
+  "证据": {
+    "参考": "Windows 对 WSL 根目录提供 UNC 访问 `\\\\wsl.localhost\\<distro>\\home\\<user>` 的标准结构",
+    "说明": "尽管当前运行环境无法直接验证 UNC 枚举，但该结构为微软官方定义，遍历 `\\\\wsl.localhost\\` 可获取所有发行版。"
+  },
+  "影响": "可在无额外配置的情况下自动发现 auth.json，同时允许通过环境变量覆盖以满足自定义需求。"
+}

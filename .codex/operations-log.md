@@ -1,0 +1,21 @@
+## 2024-XX-XX 操作日志
+
+- 发现 `sequential-thinking` 工具在当前环境中不可用，已尝试 `which sequential-thinking` 验证失败，将改用手动深度思考并在相关文档中说明。
+- 发现 `shrimp-task-manager` 工具不可用，已执行 `which shrimp-task-manager` 确认，后续将手动编制计划并在文档中记录。
+- 扩展 `FloatingMonitor` 支持 `.codex/auth.json` 的读写，新增双标记逻辑与 OpenAI 写入操作。
+- 执行 `python3 -m compileall src/ui_floating.py` 验证语法。
+- 用户新增需求：在 WSL 环境下需支持 `\\wsl.localhost\Ubuntu-24.04\home\jason\.codex\auth.json`，决定增加路径解析逻辑并支持自发现。
+- 新增 Codex 路径解析逻辑，支持环境变量与 WSL UNC 枚举；更新 set_openai_key 在写入前重新解析路径。
+- 再次执行 `python3 -m compileall src/ui_floating.py` 验证语法。
+- 检查 `exa` 工具不可用，计划改用其他方式获取资料。
+- 引入 `wsl.exe` 枚举逻辑，通过 UNC 路径转换定位 `.codex/auth.json`。
+- 再次使用 `python3 -m compileall src/ui_floating.py` 进行语法检查。
+- 重构 Codex OpenAI Key 读写：区分 Windows 与 WSL 目标，通过 `wsl.exe` 执行写入并在 UI 中展示逐项结果。
+- 执行 `python3 -m compileall src/ui_floating.py` 验证语法。
+- 增强日志与进度输出：记录 WSL 目标检测情况，并在 UI 进度窗逐项展示写入状态与原因，便于用户确认执行轨迹。
+- 重新执行 `python3 -m compileall src/ui_floating.py` 验证语法。
+- 修复 `wsl.exe` 输出含 UTF-16 空字符导致的解析/解码错误，新增 `_run_wsl_command` 统一处理编码并捕获异常，防止线程 UnicodeDecodeError。
+- 优化 WSL 目标构建：为每个发行版仅选择一个 UNC 根，避免重复记录；若根目录不存在则回退，但仍保持路径可读。
+- 修正查询结果匹配逻辑，去除 `●/◎` 标记后再比对用户名，避免设置 OpenAI Key 后表格状态停留在“查询中”。
+- 使用 `ThreadPoolExecutor` 并行关闭浏览器实例，显著缩短退出时的 Chrome 驱动回收耗时。
+- 进一步优化退出速度：预先 kill Chromedriver 进程、为线程池加入 5 秒超时及超时取消逻辑，避免长期阻塞。

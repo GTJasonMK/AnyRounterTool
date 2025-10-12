@@ -1,0 +1,7 @@
+{
+  "interface_contract": true,
+  "tech_rationale": true,
+  "risks_identified": true,
+  "validation_plan": true,
+  "notes": "Contributor guide will reference existing CLI workflows, manual smoke tests, and inferred commit conventions."
+}
