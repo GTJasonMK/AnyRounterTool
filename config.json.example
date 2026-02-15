@@ -22,6 +22,19 @@
     "timeout": 8,
     "fallback_to_web": true
   },
+  "web_check": {
+    "enabled": false,
+    "command": "",
+    "chromedriver_path": "",
+    "pool_size": 4,
+    "max_pool_size": 9,
+    "args": [
+      "{username}",
+      "{password}",
+      "{api_key}"
+    ],
+    "timeout_seconds": 90
+  },
   "ui": {
     "window_size": [
       150,
