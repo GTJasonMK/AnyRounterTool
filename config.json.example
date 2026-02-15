@@ -14,7 +14,13 @@
     "auto_detect_workers": false,
     "query_interval": 60,
     "retry_times": 2,
-    "retry_delay": 3
+    "retry_delay": 3,
+    "daily_rollover_hour": 8
+  },
+  "api": {
+    "base_url": "https://anyrouter.top",
+    "timeout": 8,
+    "fallback_to_web": true
   },
   "ui": {
     "window_size": [

@@ -819,16 +819,42 @@ class FloatingMonitor(QMainWindow):
                 self.add_progress("⚠ 没有找到账号配置，请检查 credentials.txt")
                 return
 
+            cached_balances = self.service.get_cached_balances()
+            cache_hit_count = 0
+            latest_cache_time = ""
+
             self.table.setRowCount(len(accounts))
 
             for i, account in enumerate(accounts):
                 display_name = self._build_account_display_name(account)
                 self.table.setItem(i, 0, QTableWidgetItem(display_name))
-                self.table.setItem(i, 1, QTableWidgetItem("等待"))
-                self.table.setItem(i, 2, QTableWidgetItem("待机"))
+
+                cache_item = cached_balances.get(account.username, {})
+                cached_balance = str(cache_item.get("balance", "")).strip()
+                cached_at = str(cache_item.get("updated_at", "")).strip()
+
+                if cached_balance:
+                    cache_hit_count += 1
+                    if cached_at and cached_at > latest_cache_time:
+                        latest_cache_time = cached_at
+
+                    self.table.setItem(i, 1, QTableWidgetItem(cached_balance))
+                    status_item = QTableWidgetItem("缓存")
+                    status_item.setForeground(QColor("#ffcc66"))
+                    self.table.setItem(i, 2, status_item)
+                else:
+                    self.table.setItem(i, 1, QTableWidgetItem("等待"))
+                    self.table.setItem(i, 2, QTableWidgetItem("待机"))
 
             # 更新环境变量状态显示
             self.update_env_status_display()
+            self.update_total_balance()
+
+            if cache_hit_count > 0:
+                if latest_cache_time:
+                    self.add_progress(f"已加载 {cache_hit_count} 个账号缓存余额（更新时间: {latest_cache_time}）")
+                else:
+                    self.add_progress(f"已加载 {cache_hit_count} 个账号缓存余额")
 
             self.logger.info(f"成功加载 {len(accounts)} 个账号")
         except Exception as e:
@@ -1653,8 +1679,8 @@ class FloatingMonitor(QMainWindow):
             balance_text = self.table.item(i, 1).text()
             status_text = self.table.item(i, 2).text()
 
-            # 只统计成功查询的余额
-            if status_text == "OK":
+            # 统计成功查询与缓存余额
+            if status_text in ("OK", "缓存"):
                 try:
                     # 尝试解析余额（移除可能的货币符号和格式）
                     balance_str = balance_text.replace('$', '').replace('¥', '').replace(',', '').strip()

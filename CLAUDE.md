@@ -16,18 +16,17 @@ AnyRouter余额监控器 - 基于 PyQt6 和 Selenium 的自动化账户余额查
 - **服务层**: `src/auth_manager.py` - 认证和余额提取逻辑
 - **基础层**:
   - `src/browser_manager.py` - Selenium 浏览器封装
-  - `src/browser_pool.py` - **新增** 浏览器实例池化管理
+  - `src/browser_pool.py` - 浏览器实例池化管理
   - `src/config_manager.py` - 配置管理
-  - `src/driver_manager.py` - **新增** ChromeDriver自动版本管理
-  - `src/resource_manager.py` - **新增** 统一资源清理管理
-  - `src/performance_monitor.py` - **新增** 性能监控和指标收集
+  - `src/driver_manager.py` - ChromeDriver自动版本管理
+  - `src/performance_monitor.py` - 性能监控和指标收集
 
 ### 关键设计模式
 - **对象池模式**: `BrowserPool` - 复用浏览器实例，避免重复创建开销
 - **上下文管理器**: `BrowserManager.create_driver()`, `BrowserPool.get_browser()` - 自动管理资源生命周期
 - **线程池并发**: `ThreadPoolExecutor` - 实现多账户并行查询
 - **回调机制**: 监控服务通过回调函数通知 UI 更新状态
-- **单例模式**: 全局浏览器池、性能监控器、资源管理器
+- **单例模式**: 全局浏览器池、性能监控器
 - **配置分离**: JSON 配置文件 + 账号凭证文件分离管理
 
 ## 开发命令
@@ -112,28 +111,21 @@ pip install -r requirements.txt
 - **登录流程**: 优化的登录流程，自动切换到邮箱登录模式
 - **性能优化**: 减少了不必要的等待时间，从原版的多处3秒等待优化到0.5-1.5秒
 
-### 浏览器池管理 (`browser_pool.py`) - **核心优化**
+### 浏览器池管理 (`browser_pool.py`)
 - **实例复用**: 预创建3个浏览器实例，最大支持9个，避免重复启动开销
 - **状态管理**: 自动清理cookies、localStorage、sessionStorage，确保实例可复用
 - **智能分配**: 线程安全的实例获取和归还机制
 - **性能统计**: 实时追踪实例复用率、等待时间等指标
 - **资源监控**: 自动检测实例健康状态，失效实例自动重建
 
-### ChromeDriver管理 (`driver_manager.py`) - **新增**
+### ChromeDriver管理 (`driver_manager.py`)
 - **自动检测**: 自动检测本地Chrome浏览器版本(支持Windows/macOS/Linux)
 - **智能下载**: 根据Chrome版本自动下载匹配的ChromeDriver
 - **多源支持**: 支持Chrome for Testing、Google官方源、NPM镜像等多个下载源
 - **版本缓存**: 已下载的驱动缓存在本地，避免重复下载
 - **降级策略**: API失败时自动切换到备用下载源
 
-### 资源管理 (`resource_manager.py`) - **新增**
-- **统一清理**: 注册所有需要清理的资源(浏览器、临时文件、线程等)
-- **多重保护**: 程序退出、系统信号、异常情况下都能正确清理资源
-- **进程管理**: 自动清理僵尸Chrome进程，防止资源泄露
-- **临时文件**: 智能管理临时目录，自动清理超过24小时的旧文件
-- **错误处理**: 统一的错误处理和重试策略
-
-### 性能监控 (`performance_monitor.py`) - **新增**
+### 性能监控 (`performance_monitor.py`)
 - **指标收集**: 自动记录每个操作的耗时、成功率、错误信息
 - **系统监控**: 实时监控CPU、内存使用、Chrome进程数量
 - **统计分析**: 计算平均耗时、最小/最大耗时、成功率等统计指标
@@ -161,27 +153,6 @@ pip install -r requirements.txt
 3. 环境变量 `ANYROUTER_HEADLESS=1` (强制无头模式)
 4. 命令行参数 `--headless`, `--debug`, `--config` (最高优先级)
 
-### 默认配置层次
-```python
-DEFAULT_CONFIG = {
-    "browser": {
-        "headless": True,           # 监控服务强制为True
-        "timeout": 10,
-        "page_load_timeout": 20,
-        "window_size": "1920,1080",
-        "disable_images": True      # 性能优化
-    },
-    "performance": {
-        "max_workers": 9,           # 最大并发数
-        "auto_detect_workers": True # 自动检测CPU核心数
-    },
-    "ui": {
-        "auto_collapse": True,      # 自动收缩
-        "collapse_delay": 600       # 收缩延迟(毫秒)
-    }
-}
-```
-
 ## 性能基准
 
 - **单账号查询**: ~25秒(包含登录、弹窗处理、余额提取)
@@ -206,13 +177,49 @@ DEFAULT_CONFIG = {
 - DOM 结构变化可能导致提取策略失效
 - 查看日志文件获取详细错误信息
 
+## UI 主题和样式规范
+
+### 颜色体系（深色主题）
+- **背景渐变**: `rgba(20, 20, 30, 230)` → `rgba(30, 30, 45, 230)`
+- **主按钮（紫色）**: `#5555ff` → `#8855ff`
+- **退出按钮（红色）**: `#ff5555` → `#ff8855`
+- **成功状态**: `#4caf50`（绿色）
+- **失败状态**: `#f44336`（红色）
+- **总余额显示**: `#90d090` / `#90ff90`
+- **边框高亮**: `rgba(100, 100, 255, 0.2)` → `rgba(150, 150, 255, 0.4)`
+
+### 尺寸规范
+- **收缩状态**: 50×50 小圆圈
+- **展开状态**: 320×200
+- **圆角**: 大容器 `20px`，按钮 `12px`，小控件 `6px`
+- **表格行高**: 固定 18px，最多显示3行
+
+### 账号状态标记
+- `●` 表示当前 Claude 配置 Token
+- `◎` 表示当前 OpenAI 配置 Key
+
+### 键盘快捷键
+| 快捷键 | 功能 |
+|--------|------|
+| `Ctrl+Q` | 退出程序 |
+| `F5` | 刷新查询 |
+| `Esc` | 收缩窗口 |
+| `Ctrl+L` | 切换进度日志 |
+| `Ctrl+Shift+C` | 复制总余额 |
+
+### 交互时间参数
+- **悬停延迟收缩**: 600ms（`ui_floating.py:1823`）
+- **查询完成后自动收缩**: 2000ms（`ui_floating.py:1645`）
+
 ## 开发注意事项
 
 1. **敏感信息**: `credentials.txt` 包含账号密码，请勿提交到版本控制(建议添加到 `.gitignore`)
 2. **线程安全**: 监控服务的状态更新使用 `status_lock` 保护，修改状态相关代码时必须使用锁
 3. **资源清理**: 浏览器实例使用上下文管理器(`with` 语句)确保正确释放，临时目录会在 `finally` 块中自动清理
-4. **跨平台**: Chrome 路径检测在 `browser_manager.py:96-133` 实现，新增平台需要添加对应路径
+4. **跨平台**: Chrome 路径检测在 `browser_manager.py:101-138` 实现，新增平台需要添加对应路径
 5. **ChromeDriver 版本**: 必须与本地 Chrome 浏览器版本匹配，版本不匹配会导致 `SessionNotCreatedException`
 6. **并发限制**: 线程池最多使用9个工作线程，过多并发会导致系统资源耗尽
-7. **余额提取稳定性**: 如果目标网站DOM结构变化，需要修改 `auth_manager.py:272-321` 中的JavaScript提取逻辑
+7. **余额提取稳定性**: 如果目标网站DOM结构变化，需要修改 `auth_manager.py:272-391` 中的JavaScript提取逻辑
 8. **回调函数**: 自定义UI时必须正确设置监控服务的三个回调函数，否则无法接收状态更新
+9. **强制 headless 模式**: 监控服务在 `monitor_service.py:54` 强制设置 `headless=True`，如需调试需临时注释
+10. **浏览器池配置**: 初始池大小4个，最大9个（`browser_pool.py:355-358`）

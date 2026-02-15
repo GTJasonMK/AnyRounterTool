@@ -43,7 +43,13 @@ class ConfigManager:
             "auto_detect_workers": True,
             "query_interval": 60,
             "retry_times": 2,  # 减少重试次数
-            "retry_delay": 3  # 减少重试延迟
+            "retry_delay": 3,  # 减少重试延迟
+            "daily_rollover_hour": 8
+        },
+        "api": {
+            "base_url": "https://anyrouter.top",
+            "timeout": 8,
+            "fallback_to_web": True
         },
         "ui": {
             "window_size": [320, 280],

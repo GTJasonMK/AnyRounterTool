@@ -73,6 +73,8 @@ nul
 # Sensitive files - 不要提交到Git！
 credentials.txt
 config.json
+balance_cache.json
+daily_web_login_state.json
 
 # Chrome driver - 大型二进制文件，需要单独下载
 chromedriver.exe

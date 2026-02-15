@@ -6,6 +6,7 @@
 
 import time
 import logging
+import re
 from typing import Optional, Dict, Tuple
 from dataclasses import dataclass
 
@@ -31,6 +32,7 @@ class AuthManager:
 
     LOGIN_URL = "https://anyrouter.top/login"
     CONSOLE_URL = "https://anyrouter.top/console"
+    QUOTA_UNIT_PER_DOLLAR = 500000
 
     def __init__(self, browser_manager: BrowserManager):
         """初始化认证管理器"""
@@ -59,7 +61,7 @@ class AuthManager:
             time.sleep(0.8)  # 轻微减少等待
 
             # 检查是否被重定向到登录页
-            current_url = self.browser.get_current_url()
+            current_url = self.browser.get_current_url() or ""
             if '/login' in current_url:
                 # Step 2: 处理公告弹窗（立即检查）
                 time.sleep(0.5)  # 短暂等待弹窗
@@ -105,7 +107,7 @@ class AuthManager:
                 time.sleep(0.8)
 
             # 检查登录结果
-            current_url = self.browser.get_current_url()
+            current_url = self.browser.get_current_url() or ""
             if '/console' in current_url:
                 self.logger.info(f"用户 {username} 登录成功")
                 return LoginResult(True, "登录成功")
@@ -232,7 +234,7 @@ class AuthManager:
             time.sleep(1)  # 减少等待时间
 
             # 检查是否被重定向到登录页
-            current_url = self.browser.get_current_url()
+            current_url = self.browser.get_current_url() or ""
             is_logged_in = '/console' in current_url and '/login' not in current_url
 
             self.logger.debug(f"登录状态: {is_logged_in}")
@@ -241,6 +243,1220 @@ class AuthManager:
         except Exception as e:
             self.logger.error(f"检查登录状态失败: {e}")
             return False
+
+    @staticmethod
+    def parse_balance_number(balance: Optional[str]) -> Optional[float]:
+        """将余额文本解析为浮点数"""
+        if balance is None:
+            return None
+
+        text = str(balance).strip()
+        if not text:
+            return None
+
+        match = re.search(r'-?[\d,]+(?:\.\d+)?', text)
+        if not match:
+            return None
+
+        try:
+            return float(match.group(0).replace(',', ''))
+        except ValueError:
+            return None
+
+    def sync_first_apikey_limit(self, balance: Optional[str], timeout: int = 12) -> Tuple[bool, str]:
+        """
+        登录后尝试将首个 API Key 的额度同步为当前余额。
+        该逻辑为增强功能，同步失败不影响主流程。
+        """
+        if not self.browser or not self.browser.driver:
+            return False, "浏览器会话不可用"
+
+        self.logger.debug(f"开始同步首个 API Key 额度，原始余额文本: {balance}")
+        amount = self.parse_balance_number(balance)
+        if amount is None:
+            return False, "余额格式无法解析"
+        self.logger.debug(f"余额解析成功: {amount:.6f}")
+
+        try:
+            # 1) 进入 API令牌 页面
+            ok, msg = self._open_apikey_page(timeout=timeout)
+            if not ok:
+                return False, msg
+            self.logger.debug("步骤1完成：已进入 API令牌 页面")
+
+            # 2) 打开第一条令牌的编辑弹窗
+            ok, msg = self._open_first_token_editor(timeout=timeout)
+            if not ok:
+                return False, msg
+            self.logger.debug("步骤2完成：首条令牌编辑弹窗已打开")
+
+            # 3) 自动识别额度换算比例，计算目标额度值
+            unit_rate = self._detect_quota_unit_rate()
+            target_quota = max(int(round(amount * unit_rate)), 0)
+            self.logger.debug(
+                f"步骤3完成：额度换算比例={unit_rate:.6f}, 目标额度值={target_quota}"
+            )
+
+            # 4) 写入额度并提交
+            ok, msg = self._set_modal_quota_value(target_quota)
+            if not ok:
+                return False, msg
+            self.logger.debug("步骤4完成：额度输入已写入")
+
+            ok, msg = self._submit_quota_modal(timeout=timeout)
+            if not ok:
+                return False, msg
+            self.logger.debug("步骤5完成：额度提交成功且弹窗已关闭")
+
+            self.logger.info(
+                f"首个 API Key 额度已同步: 余额=${amount:.2f}, 额度值={target_quota}, 比例={unit_rate:.2f}"
+            )
+            return True, f"额度已更新为 ${amount:.2f}"
+
+        except Exception as e:
+            self.logger.warning(f"同步首个 API Key 额度失败: {e}")
+            return False, str(e)
+
+    def _open_apikey_page(self, timeout: int = 8) -> Tuple[bool, str]:
+        """按页面路径进入 API令牌 页面"""
+        driver = self.browser.driver
+        self.logger.debug("准备进入 API令牌 页面")
+
+        # 优先通过左侧菜单点击进入，符合实际操作路径
+        menu_xpath = (
+            "//*[self::a or self::button or self::span or self::div]"
+            "[normalize-space(text())='API令牌']"
+        )
+
+        try:
+            menu_node = WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((By.XPATH, menu_xpath))
+            )
+            clickable = driver.execute_script(
+                """
+                let node = arguments[0];
+                while (node) {
+                    const tag = (node.tagName || '').toLowerCase();
+                    const role = node.getAttribute ? (node.getAttribute('role') || '').toLowerCase() : '';
+                    const cls = node.className ? String(node.className).toLowerCase() : '';
+                    if (tag === 'a' || tag === 'button' || role === 'button' || cls.includes('semi-navigation-item')) {
+                        return node;
+                    }
+                    node = node.parentElement;
+                }
+                return arguments[0];
+                """,
+                menu_node
+            )
+            driver.execute_script("arguments[0].click();", clickable)
+            self.logger.debug("已点击左侧 API令牌 菜单")
+        except TimeoutException:
+            self.logger.debug("未找到左侧 API令牌 菜单节点")
+            return False, "未找到左侧 API令牌 菜单"
+        except Exception as e:
+            self.logger.debug(f"点击 API令牌 菜单异常: {e}")
+            return False, f"进入 API令牌 页面失败: {e}"
+
+        # 等待页面关键控件出现
+        try:
+            WebDriverWait(driver, timeout).until(
+                lambda d: d.execute_script(
+                    """
+                    const text = document.body && document.body.innerText ? document.body.innerText : '';
+                    return text.includes('添加令牌') || text.includes('复制所选令牌到剪贴板');
+                    """
+                )
+            )
+            current_url = driver.current_url if driver else ""
+            self.logger.debug(f"API令牌 页面已加载，当前URL: {current_url}")
+            return True, ""
+        except TimeoutException:
+            self.logger.debug("等待 API令牌 页面关键控件超时")
+            return False, "API令牌 页面未加载完成"
+
+    def _open_first_token_editor(self, timeout: int = 8) -> Tuple[bool, str]:
+        """打开第一条令牌的编辑弹窗"""
+        driver = self.browser.driver
+        self.logger.debug("准备打开第一条令牌编辑弹窗")
+
+        editor_open_script = """
+            function isVisible(node) {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            }
+
+            const hasEditorHeader = Array.from(document.querySelectorAll('*')).some((node) => {
+                if (!isVisible(node)) return false;
+                const text = (node.textContent || '').trim();
+                return text.includes('更新令牌信息') || text.includes('额度设置') || text.includes('编辑令牌');
+            });
+
+            const hasQuotaLabel = Array.from(document.querySelectorAll('*')).some((node) => {
+                if (!isVisible(node)) return false;
+                return (node.textContent || '').trim() === '额度';
+            });
+
+            const hasSubmit = Array.from(document.querySelectorAll('button, [role="button"]')).some((btn) => {
+                if (!isVisible(btn)) return false;
+                if (btn.disabled) return false;
+                const text = (btn.innerText || btn.textContent || '').trim();
+                return text.includes('提交');
+            });
+
+            return hasEditorHeader || (hasQuotaLabel && hasSubmit);
+        """
+
+        wait_row_script = """
+            function isVisible(node) {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            }
+            function normalizeText(text) {
+                return String(text || '').replace(/\\s+/g, ' ').trim();
+            }
+            function hasTokenActions(row) {
+                if (!row) return false;
+                const texts = Array.from(row.querySelectorAll('button, a, [role="button"], span, div'))
+                    .map((node) => normalizeText(node.innerText || node.textContent || ''))
+                    .filter((text) => !!text);
+                const hasCopy = texts.some((text) => text === '复制');
+                const hasEdit = texts.some((text) => text === '编辑');
+                return hasCopy && hasEdit;
+            }
+            function isLikelyTokenRow(row) {
+                const text = normalizeText(row ? row.innerText : '');
+                if (!text) return false;
+                if (row && row.querySelector('th')) return false;
+                if (hasTokenActions(row)) return true;
+                return text.includes('已启用') && text.includes('用户分组') && text.includes('编辑');
+            }
+            function hasAction(row) {
+                const controls = Array.from(row.querySelectorAll('button, a, [role="button"], span, div'));
+                return controls.some((node) => {
+                    const text = normalizeText(node.innerText || node.textContent || '');
+                    return text.includes('编辑') || text.includes('更多') || text.includes('操作');
+                });
+            }
+            const rows = Array.from(
+                document.querySelectorAll('tbody tr, .semi-table-tbody .semi-table-row, .semi-table-row')
+            ).filter((row) => isVisible(row) && isLikelyTokenRow(row) && hasAction(row));
+            return rows.length > 0;
+        """
+
+        direct_click_script = """
+            function isVisible(node) {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            }
+            function normalizeText(text) {
+                return String(text || '').replace(/\\s+/g, ' ').trim();
+            }
+            function toClickable(node) {
+                let cursor = node;
+                while (cursor) {
+                    const tag = (cursor.tagName || '').toLowerCase();
+                    const role = cursor.getAttribute ? (cursor.getAttribute('role') || '').toLowerCase() : '';
+                    if (tag === 'button' || tag === 'a' || role === 'button') {
+                        return cursor;
+                    }
+                    cursor = cursor.parentElement;
+                }
+                return node;
+            }
+            function isEnabled(node) {
+                if (!node) return false;
+                if (node.disabled) return false;
+                const aria = node.getAttribute ? (node.getAttribute('aria-disabled') || '').toLowerCase() : '';
+                if (aria === 'true') return false;
+                const style = window.getComputedStyle(node);
+                if (style.pointerEvents === 'none') return false;
+                return true;
+            }
+            function hasTokenActions(row) {
+                if (!row) return false;
+                const texts = Array.from(row.querySelectorAll('button, a, [role="button"], span, div'))
+                    .map((node) => normalizeText(node.innerText || node.textContent || ''))
+                    .filter((text) => !!text);
+                const hasCopy = texts.some((text) => text === '复制');
+                const hasEdit = texts.some((text) => text === '编辑');
+                return hasCopy && hasEdit;
+            }
+            function isLikelyTokenRow(row) {
+                const text = normalizeText(row ? row.innerText : '');
+                if (!text) return false;
+                if (row && row.querySelector('th')) return false;
+                if (hasTokenActions(row)) return true;
+                return text.includes('已启用') && text.includes('用户分组') && text.includes('编辑');
+            }
+            function collectEditCandidates(root) {
+                const exact = [];
+                const fuzzy = [];
+                const nodes = Array.from(root.querySelectorAll('button, a, [role="button"], span, div'));
+                for (const node of nodes) {
+                    const text = normalizeText(node.innerText || node.textContent || '');
+                    if (!text || !text.includes('编辑') || !isVisible(node)) continue;
+
+                    const hasChildExactEdit = Array.from(node.querySelectorAll('*')).some((child) => {
+                        const childText = normalizeText(child.innerText || child.textContent || '');
+                        return childText === '编辑';
+                    });
+                    if (hasChildExactEdit && text !== '编辑') continue;
+
+                    const clickable = toClickable(node);
+                    if (!isVisible(clickable) || !isEnabled(clickable)) continue;
+                    const clickableText = normalizeText(clickable.innerText || clickable.textContent || '');
+                    if (clickableText.includes('复制') && clickableText.includes('编辑') && text !== '编辑') {
+                        continue;
+                    }
+
+                    const bucket = (text === '编辑' || clickableText === '编辑') ? exact : fuzzy;
+                    if (!bucket.includes(clickable)) {
+                        bucket.push(clickable);
+                    }
+                }
+                return exact.concat(fuzzy);
+            }
+            function clickWithEvents(node) {
+                if (!node) return { clicked: false, reason: 'no_target' };
+                node.scrollIntoView({ block: 'center', inline: 'center' });
+                const rect = node.getBoundingClientRect();
+                const x = Math.floor(rect.left + rect.width / 2);
+                const y = Math.floor(rect.top + rect.height / 2);
+                const target = node;
+                const events = ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+                for (const name of events) {
+                    const Ctor = name.startsWith('pointer') ? PointerEvent : MouseEvent;
+                    target.dispatchEvent(new Ctor(name, {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        clientX: x,
+                        clientY: y
+                    }));
+                }
+                if (typeof node.click === 'function') {
+                    node.click();
+                }
+                return {
+                    clicked: true,
+                    x: x,
+                    y: y,
+                    targetTag: (target.tagName || '').toLowerCase(),
+                    targetText: normalizeText(target.innerText || target.textContent || '').slice(0, 40)
+                };
+            }
+
+            const rows = Array.from(
+                document.querySelectorAll('tbody tr, .semi-table-tbody .semi-table-row, .semi-table-row')
+            ).filter((row) => isVisible(row) && isLikelyTokenRow(row));
+            const row = rows.length ? rows[0] : null;
+            if (!row) {
+                return { clicked: false, reason: 'no_token_row' };
+            }
+
+            row.scrollIntoView({ block: 'center', inline: 'nearest' });
+            row.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true, view: window }));
+            row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window }));
+
+            const candidates = collectEditCandidates(row);
+            if (!candidates.length) {
+                return {
+                    clicked: false,
+                    reason: 'row_no_direct_edit',
+                    rowText: normalizeText(row.innerText || '').slice(0, 120)
+                };
+            }
+
+            const target = candidates[0];
+            const clickInfo = clickWithEvents(target);
+            return {
+                clicked: clickInfo.clicked,
+                reason: 'row_direct',
+                candidateCount: candidates.length,
+                rowText: normalizeText(row.innerText || '').slice(0, 120),
+                candidateText: normalizeText(target.innerText || target.textContent || '').slice(0, 40),
+                x: clickInfo.x,
+                y: clickInfo.y,
+                targetTag: clickInfo.targetTag,
+                targetText: clickInfo.targetText
+            };
+        """
+
+        dropdown_click_script = """
+            function isVisible(node) {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            }
+            function normalizeText(text) {
+                return String(text || '').replace(/\\s+/g, ' ').trim();
+            }
+            function toClickable(node) {
+                let cursor = node;
+                while (cursor) {
+                    const tag = (cursor.tagName || '').toLowerCase();
+                    const role = cursor.getAttribute ? (cursor.getAttribute('role') || '').toLowerCase() : '';
+                    if (tag === 'button' || tag === 'a' || role === 'button') {
+                        return cursor;
+                    }
+                    cursor = cursor.parentElement;
+                }
+                return node;
+            }
+            function isEnabled(node) {
+                if (!node) return false;
+                if (node.disabled) return false;
+                const aria = node.getAttribute ? (node.getAttribute('aria-disabled') || '').toLowerCase() : '';
+                if (aria === 'true') return false;
+                const style = window.getComputedStyle(node);
+                if (style.pointerEvents === 'none') return false;
+                return true;
+            }
+            function hasTokenActions(row) {
+                if (!row) return false;
+                const texts = Array.from(row.querySelectorAll('button, a, [role="button"], span, div'))
+                    .map((node) => normalizeText(node.innerText || node.textContent || ''))
+                    .filter((text) => !!text);
+                const hasCopy = texts.some((text) => text === '复制');
+                const hasEdit = texts.some((text) => text === '编辑');
+                return hasCopy && hasEdit;
+            }
+            function isLikelyTokenRow(row) {
+                const text = normalizeText(row ? row.innerText : '');
+                if (!text) return false;
+                if (row && row.querySelector('th')) return false;
+                if (hasTokenActions(row)) return true;
+                return text.includes('已启用') && text.includes('用户分组') && text.includes('编辑');
+            }
+            function clickWithEvents(node) {
+                if (!node) return { clicked: false, reason: 'no_target' };
+                node.scrollIntoView({ block: 'center', inline: 'center' });
+                const rect = node.getBoundingClientRect();
+                const x = Math.floor(rect.left + rect.width / 2);
+                const y = Math.floor(rect.top + rect.height / 2);
+                const target = node;
+                const events = ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+                for (const name of events) {
+                    const Ctor = name.startsWith('pointer') ? PointerEvent : MouseEvent;
+                    target.dispatchEvent(new Ctor(name, {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        clientX: x,
+                        clientY: y
+                    }));
+                }
+                if (typeof node.click === 'function') {
+                    node.click();
+                }
+                return {
+                    clicked: true,
+                    x: x,
+                    y: y,
+                    targetTag: (target.tagName || '').toLowerCase(),
+                    targetText: normalizeText(target.innerText || target.textContent || '').slice(0, 40)
+                };
+            }
+
+            const rows = Array.from(
+                document.querySelectorAll('tbody tr, .semi-table-tbody .semi-table-row, .semi-table-row')
+            ).filter((row) => isVisible(row) && isLikelyTokenRow(row));
+            const row = rows.length ? rows[0] : null;
+            if (!row) {
+                return { clicked: false, reason: 'no_token_row' };
+            }
+
+            row.scrollIntoView({ block: 'center', inline: 'nearest' });
+            row.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true, view: window }));
+            row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window }));
+
+            const controls = [];
+            for (const node of Array.from(row.querySelectorAll('button, a, [role="button"], span, div, i'))) {
+                const clickable = toClickable(node);
+                if (!clickable || !isVisible(clickable) || !isEnabled(clickable)) continue;
+                if (!controls.includes(clickable)) {
+                    controls.push(clickable);
+                }
+            }
+            controls.sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left);
+
+            const triggerCandidates = controls.filter((node) => {
+                const text = normalizeText(node.innerText || node.textContent || '');
+                const cls = String(node.className || '').toLowerCase();
+                const aria = String(node.getAttribute ? node.getAttribute('aria-label') || '' : '').toLowerCase();
+                if (text.includes('更多') || text.includes('操作') || text === '...' || text === '…') return true;
+                return (
+                    cls.includes('more') || cls.includes('ellipsis') || cls.includes('semi-icon-more') ||
+                    cls.includes('semi-icons-more') || aria.includes('more') || aria.includes('更多')
+                );
+            });
+            const ordered = triggerCandidates.length ? triggerCandidates : controls.slice(0, 3);
+            if (!ordered.length) {
+                return {
+                    clicked: false,
+                    reason: 'no_action_trigger',
+                    rowText: normalizeText(row.innerText || '').slice(0, 120)
+                };
+            }
+
+            for (let idx = 0; idx < ordered.length && idx < 3; idx += 1) {
+                const trigger = ordered[idx];
+                clickWithEvents(trigger);
+
+                const menus = Array.from(document.querySelectorAll(
+                    '.semi-dropdown-item, .semi-dropdown-menu-item, [role="menuitem"], ' +
+                    '.semi-popover-content button, .semi-popover-content [role="button"], ' +
+                    '.semi-portal [role="menuitem"], .semi-portal button'
+                ));
+
+                const exactEditItems = [];
+                const fuzzyEditItems = [];
+                for (const item of menus) {
+                    if (!isVisible(item)) continue;
+                    const clickable = toClickable(item);
+                    if (!isVisible(clickable) || !isEnabled(clickable)) continue;
+                    const text = normalizeText(clickable.innerText || clickable.textContent || '');
+                    if (!text.includes('编辑')) continue;
+                    if (text.includes('复制') && text.includes('编辑')) continue;
+                    const bucket = text === '编辑' ? exactEditItems : fuzzyEditItems;
+                    if (!bucket.includes(clickable)) {
+                        bucket.push(clickable);
+                    }
+                }
+
+                const editItems = exactEditItems.concat(fuzzyEditItems);
+                if (!editItems.length) continue;
+
+                const editInfo = clickWithEvents(editItems[0]);
+                return {
+                    clicked: editInfo.clicked,
+                    reason: 'menu_edit',
+                    triggerIndex: idx + 1,
+                    triggerText: normalizeText(trigger.innerText || trigger.textContent || '').slice(0, 40),
+                    menuEditCount: editItems.length,
+                    rowText: normalizeText(row.innerText || '').slice(0, 120),
+                    x: editInfo.x,
+                    y: editInfo.y,
+                    targetTag: editInfo.targetTag,
+                    targetText: editInfo.targetText
+                };
+            }
+
+            return {
+                clicked: false,
+                reason: 'menu_edit_not_found',
+                triggerCount: ordered.length,
+                rowText: normalizeText(row.innerText || '').slice(0, 120)
+            };
+        """
+
+        global_click_script = """
+            function isVisible(node) {
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            }
+            function normalizeText(text) {
+                return String(text || '').replace(/\\s+/g, ' ').trim();
+            }
+            function toClickable(node) {
+                let cursor = node;
+                while (cursor) {
+                    const tag = (cursor.tagName || '').toLowerCase();
+                    const role = cursor.getAttribute ? (cursor.getAttribute('role') || '').toLowerCase() : '';
+                    if (tag === 'button' || tag === 'a' || role === 'button') {
+                        return cursor;
+                    }
+                    cursor = cursor.parentElement;
+                }
+                return node;
+            }
+            function isEnabled(node) {
+                if (!node) return false;
+                if (node.disabled) return false;
+                const aria = node.getAttribute ? (node.getAttribute('aria-disabled') || '').toLowerCase() : '';
+                if (aria === 'true') return false;
+                const style = window.getComputedStyle(node);
+                if (style.pointerEvents === 'none') return false;
+                return true;
+            }
+            function hasTokenActions(row) {
+                if (!row) return false;
+                const texts = Array.from(row.querySelectorAll('button, a, [role="button"], span, div'))
+                    .map((node) => normalizeText(node.innerText || node.textContent || ''))
+                    .filter((text) => !!text);
+                const hasCopy = texts.some((text) => text === '复制');
+                const hasEdit = texts.some((text) => text === '编辑');
+                return hasCopy && hasEdit;
+            }
+            function isLikelyTokenRow(row) {
+                const text = normalizeText(row ? row.innerText : '');
+                if (!text) return false;
+                if (row && row.querySelector('th')) return false;
+                if (hasTokenActions(row)) return true;
+                return text.includes('已启用') && text.includes('用户分组') && text.includes('编辑');
+            }
+            function collectEditCandidates(root) {
+                const exact = [];
+                const fuzzy = [];
+                const nodes = Array.from(root.querySelectorAll('button, a, [role="button"], span, div'));
+                for (const node of nodes) {
+                    const text = normalizeText(node.innerText || node.textContent || '');
+                    if (!text || !text.includes('编辑') || !isVisible(node)) continue;
+
+                    const hasChildExactEdit = Array.from(node.querySelectorAll('*')).some((child) => {
+                        const childText = normalizeText(child.innerText || child.textContent || '');
+                        return childText === '编辑';
+                    });
+                    if (hasChildExactEdit && text !== '编辑') continue;
+
+                    const clickable = toClickable(node);
+                    if (!isVisible(clickable) || !isEnabled(clickable)) continue;
+                    const clickableText = normalizeText(clickable.innerText || clickable.textContent || '');
+                    if (clickableText.includes('复制') && clickableText.includes('编辑') && text !== '编辑') {
+                        continue;
+                    }
+
+                    const bucket = (text === '编辑' || clickableText === '编辑') ? exact : fuzzy;
+                    if (!bucket.includes(clickable)) {
+                        bucket.push(clickable);
+                    }
+                }
+                return exact.concat(fuzzy);
+            }
+            function clickWithEvents(node) {
+                if (!node) return { clicked: false, reason: 'no_target' };
+                node.scrollIntoView({ block: 'center', inline: 'center' });
+                const rect = node.getBoundingClientRect();
+                const x = Math.floor(rect.left + rect.width / 2);
+                const y = Math.floor(rect.top + rect.height / 2);
+                const target = node;
+                const events = ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+                for (const name of events) {
+                    const Ctor = name.startsWith('pointer') ? PointerEvent : MouseEvent;
+                    target.dispatchEvent(new Ctor(name, {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        clientX: x,
+                        clientY: y
+                    }));
+                }
+                if (typeof node.click === 'function') {
+                    node.click();
+                }
+                return {
+                    clicked: true,
+                    x: x,
+                    y: y,
+                    targetTag: (target.tagName || '').toLowerCase(),
+                    targetText: normalizeText(target.innerText || target.textContent || '').slice(0, 40)
+                };
+            }
+
+            const rows = Array.from(
+                document.querySelectorAll('tbody tr, .semi-table-tbody .semi-table-row, .semi-table-row')
+            ).filter((row) => isVisible(row) && isLikelyTokenRow(row));
+            const row = rows.length ? rows[0] : null;
+            const tableRoot = row ? (row.closest('table, .semi-table, .semi-table-wrapper') || row.parentElement) : document.body;
+            const searchRoot = row || tableRoot || document.body;
+
+            const candidates = collectEditCandidates(searchRoot);
+            if (!candidates.length) {
+                return {
+                    clicked: false,
+                    reason: 'no_global_edit',
+                    rowText: row ? normalizeText(row.innerText || '').slice(0, 120) : ''
+                };
+            }
+
+            const target = candidates[0];
+            const clickInfo = clickWithEvents(target);
+            return {
+                clicked: clickInfo.clicked,
+                reason: 'global_edit',
+                candidateCount: candidates.length,
+                rowText: row ? normalizeText(row.innerText || '').slice(0, 120) : '',
+                candidateText: normalizeText(target.innerText || target.textContent || '').slice(0, 40),
+                x: clickInfo.x,
+                y: clickInfo.y,
+                targetTag: clickInfo.targetTag,
+                targetText: clickInfo.targetText
+            };
+        """
+
+        try:
+            WebDriverWait(driver, timeout).until(lambda d: d.execute_script(wait_row_script))
+            self.logger.debug("检测到页面存在可操作令牌行")
+        except TimeoutException:
+            self.logger.debug("未检测到可操作令牌行")
+            return False, "未找到可编辑的令牌"
+
+        strategies = [
+            ("首行直点编辑", direct_click_script, 2),
+            ("首行菜单编辑", dropdown_click_script, 2),
+            ("表格范围编辑兜底", global_click_script, 3),
+        ]
+        last_result = "none"
+
+        try:
+            for round_index in range(1, 4):
+                self.logger.debug(f"打开编辑弹窗第 {round_index}/3 轮尝试")
+                for strategy_name, script, wait_seconds in strategies:
+                    result = driver.execute_script(script)
+                    self.logger.debug(f"{strategy_name} 返回: {result}")
+
+                    if not isinstance(result, dict) or not result.get("clicked"):
+                        last_result = result
+                        continue
+
+                    try:
+                        WebDriverWait(driver, wait_seconds).until(
+                            lambda d: d.execute_script(editor_open_script)
+                        )
+                        self.logger.debug(f"{strategy_name} 成功打开编辑弹窗")
+                        return True, ""
+                    except TimeoutException:
+                        self.logger.debug(f"{strategy_name} 已点击但弹窗仍未出现")
+                        last_result = result
+                        time.sleep(0.2)
+                        continue
+
+                try:
+                    driver.execute_script(
+                        """
+                        if (document && document.body) {
+                            document.body.dispatchEvent(new MouseEvent('click', {
+                                bubbles: true,
+                                cancelable: true,
+                                view: window
+                            }));
+                        }
+                        """
+                    )
+                except Exception:
+                    pass
+                time.sleep(0.2)
+        except Exception as e:
+            self.logger.debug(f"点击编辑按钮流程异常: {e}")
+            return False, f"点击编辑按钮失败: {e}"
+
+        diag = self._collect_editor_open_diag()
+        self.logger.debug(f"所有策略尝试后仍未打开弹窗，最后结果: {last_result}")
+        return False, f"编辑弹窗未正常打开 ({diag},last={last_result})"
+
+    def _collect_editor_open_diag(self) -> str:
+        """收集编辑弹窗打开失败时的诊断信息"""
+        driver = self.browser.driver
+        try:
+            info = driver.execute_script(
+                """
+                function isVisible(node) {
+                    if (!node) return false;
+                    const style = window.getComputedStyle(node);
+                    if (style.display === 'none' || style.visibility === 'hidden') return false;
+                    const rect = node.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                }
+
+                const editCount = Array.from(
+                    document.querySelectorAll('button, a, [role="button"], span, div')
+                ).filter((node) => {
+                    const text = (node.innerText || node.textContent || '').trim();
+                    return text.includes('编辑') && isVisible(node);
+                }).length;
+
+                const enabledEditCount = Array.from(
+                    document.querySelectorAll('button, a, [role="button"], span, div')
+                ).filter((node) => {
+                    const text = (node.innerText || node.textContent || '').trim();
+                    if (!text.includes('编辑') || !isVisible(node)) return false;
+                    let clickable = node;
+                    while (clickable) {
+                        const tag = (clickable.tagName || '').toLowerCase();
+                        const role = clickable.getAttribute ? (clickable.getAttribute('role') || '').toLowerCase() : '';
+                        if (tag === 'button' || tag === 'a' || role === 'button') break;
+                        clickable = clickable.parentElement;
+                    }
+                    clickable = clickable || node;
+                    if (!isVisible(clickable)) return false;
+                    if (clickable.disabled) return false;
+                    const aria = clickable.getAttribute ? (clickable.getAttribute('aria-disabled') || '').toLowerCase() : '';
+                    if (aria === 'true') return false;
+                    const style = window.getComputedStyle(clickable);
+                    if (style.pointerEvents === 'none') return false;
+                    return true;
+                }).length;
+
+                function isTokenRow(row) {
+                    if (!isVisible(row)) return false;
+                    if (row.querySelector('th')) return false;
+                    const text = (row.innerText || '').replace(/\\s+/g, '');
+                    const actionTexts = Array.from(row.querySelectorAll('button, a, [role="button"], span, div'))
+                        .map((node) => (node.innerText || node.textContent || '').replace(/\\s+/g, '').trim())
+                        .filter((item) => !!item);
+                    const hasCopy = actionTexts.some((item) => item === '复制');
+                    const hasEdit = actionTexts.some((item) => item === '编辑');
+                    if (hasCopy && hasEdit) return true;
+                    return text.includes('已启用') && text.includes('用户分组') && text.includes('编辑');
+                }
+
+                const tokenRows = Array.from(
+                    document.querySelectorAll('tbody tr, .semi-table-tbody .semi-table-row, .semi-table-row')
+                ).filter((row) => isTokenRow(row));
+
+                const rowEditCount = tokenRows.filter((row) => {
+                    const hasEdit = Array.from(row.querySelectorAll('button, a, [role="button"], span, div')).some((node) => {
+                        const t = (node.innerText || node.textContent || '').trim();
+                        return t.includes('编辑') && isVisible(node);
+                    });
+                    return hasEdit;
+                }).length;
+
+                const rowEnabledEditCount = tokenRows.filter((row) => {
+                    const hasEnabledEdit = Array.from(row.querySelectorAll('button, a, [role="button"], span, div')).some((node) => {
+                        const t = (node.innerText || node.textContent || '').trim();
+                        if (!t.includes('编辑') || !isVisible(node)) return false;
+                        let clickable = node;
+                        while (clickable) {
+                            const tag = (clickable.tagName || '').toLowerCase();
+                            const role = clickable.getAttribute ? (clickable.getAttribute('role') || '').toLowerCase() : '';
+                            if (tag === 'button' || tag === 'a' || role === 'button') break;
+                            clickable = clickable.parentElement;
+                        }
+                        clickable = clickable || node;
+                        if (!isVisible(clickable)) return false;
+                        if (clickable.disabled) return false;
+                        const aria = clickable.getAttribute ? (clickable.getAttribute('aria-disabled') || '').toLowerCase() : '';
+                        if (aria === 'true') return false;
+                        const style = window.getComputedStyle(clickable);
+                        if (style.pointerEvents === 'none') return false;
+                        return true;
+                    });
+                    return hasEnabledEdit;
+                }).length;
+
+                const firstRow = tokenRows.length ? tokenRows[0] : null;
+                const firstRowText = firstRow ? (firstRow.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 120) : '';
+
+                const dialogCount = Array.from(
+                    document.querySelectorAll(
+                        '.semi-modal-content, .semi-modal, .semi-sidesheet, .semi-sidesheet-content, .semi-sideSheet, [class*="sidesheet"], [class*="sideSheet"], [role="dialog"]'
+                    )
+                ).filter(isVisible).length;
+
+                const quotaCount = Array.from(document.querySelectorAll('*')).filter((node) => {
+                    return isVisible(node) && (node.textContent || '').trim() === '额度';
+                }).length;
+
+                const submitCount = Array.from(document.querySelectorAll('button, [role="button"]')).filter((btn) => {
+                    const text = (btn.innerText || btn.textContent || '').trim();
+                    return isVisible(btn) && text.includes('提交') && !btn.disabled;
+                }).length;
+
+                return {
+                    editCount,
+                    enabledEditCount,
+                    rowEditCount,
+                    rowEnabledEditCount,
+                    dialogCount,
+                    quotaCount,
+                    submitCount,
+                    firstRowText,
+                    url: window.location.href || ''
+                };
+                """
+            )
+            if isinstance(info, dict):
+                return (
+                    f"url={info.get('url','')},edit={info.get('editCount')},"
+                    f"enabledEdit={info.get('enabledEditCount')},rowEdit={info.get('rowEditCount')},"
+                    f"rowEnabledEdit={info.get('rowEnabledEditCount')},"
+                    f"dialog={info.get('dialogCount')},quota={info.get('quotaCount')},"
+                    f"submit={info.get('submitCount')},rowText={info.get('firstRowText','')}"
+                )
+        except Exception as e:
+            self.logger.debug(f"收集编辑弹窗诊断信息失败: {e}")
+        return "diag_unavailable"
+
+    def _detect_quota_unit_rate(self) -> float:
+        """从弹窗文案中识别额度换算比例，失败时使用默认值"""
+        driver = self.browser.driver
+        default_rate = float(self.QUOTA_UNIT_PER_DOLLAR)
+        self.logger.debug(f"开始检测额度换算比例，默认比例={default_rate:.0f}")
+
+        try:
+            result = driver.execute_script(
+                """
+                function isVisible(node) {
+                    if (!node) return false;
+                    const style = window.getComputedStyle(node);
+                    if (style.display === 'none' || style.visibility === 'hidden') return false;
+                    const rect = node.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                }
+                const roots = Array.from(document.querySelectorAll(
+                    '.semi-modal-content, .semi-modal, .semi-sidesheet, .semi-sidesheet-content, .semi-sideSheet, [class*="sidesheet"], [class*="sideSheet"], [role="dialog"]'
+                ));
+                let root = roots.find((item) => item && isVisible(item) && (
+                    (item.innerText || '').includes('更新令牌信息') || (item.innerText || '').includes('额度设置')
+                ));
+                if (!root) {
+                    root = roots.find((item) => item && isVisible(item));
+                }
+                if (!root) {
+                    root = document.body;
+                }
+
+                const text = root.innerText || '';
+                const amountMatch = text.match(/等价金额[:：]\\s*\\$\\s*(-?[\\d,.]+)/);
+                const amountValue = amountMatch ? Number((amountMatch[1] || '').replace(/,/g, '')) : null;
+
+                const labels = Array.from(root.querySelectorAll('*')).filter((el) => {
+                    const t = (el.textContent || '').trim();
+                    return t === '额度';
+                });
+
+                function findInput(startNode) {
+                    let node = startNode;
+                    for (let i = 0; i < 6 && node; i += 1) {
+                        const parent = node.parentElement;
+                        if (!parent) break;
+                        const input = parent.querySelector('input');
+                        if (input && isVisible(input)) return input;
+                        node = parent;
+                    }
+                    return null;
+                }
+
+                let quotaValue = null;
+                for (const label of labels) {
+                    const input = findInput(label);
+                    if (!input) continue;
+                    const raw = (input.value || '').replace(/,/g, '').trim();
+                    if (!raw) continue;
+                    const num = Number(raw);
+                    if (!Number.isNaN(num)) {
+                        quotaValue = num;
+                        break;
+                    }
+                }
+
+                return {quotaValue, amountValue};
+                """
+            )
+
+            if not isinstance(result, dict):
+                self.logger.debug("换算比例识别返回非字典结果，使用默认比例")
+                return default_rate
+
+            quota_value = result.get("quotaValue")
+            amount_value = result.get("amountValue")
+            self.logger.debug(
+                f"换算比例识别原始数据: quotaValue={quota_value}, amountValue={amount_value}"
+            )
+
+            if quota_value is None or amount_value in (None, 0):
+                self.logger.debug("换算比例识别缺少有效数据，使用默认比例")
+                return default_rate
+
+            rate = abs(float(quota_value) / float(amount_value))
+            if 1000 <= rate <= 10000000:
+                self.logger.debug(f"换算比例识别成功: {rate:.6f}")
+                return rate
+            self.logger.debug(f"换算比例超出范围({rate:.6f})，使用默认比例")
+            return default_rate
+
+        except Exception:
+            self.logger.debug("换算比例识别异常，使用默认比例")
+            return default_rate
+
+    def _set_modal_quota_value(self, quota_value: int) -> Tuple[bool, str]:
+        """在编辑弹窗中填写额度"""
+        driver = self.browser.driver
+        self.logger.debug(f"准备写入额度值: {quota_value}")
+
+        try:
+            write_result = driver.execute_script(
+                """
+                const targetQuota = String(arguments[0]);
+
+                function isVisible(node) {
+                    if (!node) return false;
+                    const style = window.getComputedStyle(node);
+                    if (style.display === 'none' || style.visibility === 'hidden') return false;
+                    const rect = node.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                }
+
+                function normalizeText(text) {
+                    return String(text || '').replace(/\\s+/g, ' ').trim();
+                }
+
+                function normalizeDigits(text) {
+                    return String(text || '').replace(/[,\\s]/g, '').trim();
+                }
+
+                function locateRoot() {
+                    const roots = Array.from(document.querySelectorAll(
+                        '.semi-modal-content, .semi-modal, .semi-sidesheet, .semi-sidesheet-content, .semi-sideSheet, [class*="sidesheet"], [class*="sideSheet"], [role="dialog"]'
+                    ));
+                    let root = roots.find((item) => item && isVisible(item) && (
+                        (item.innerText || '').includes('更新令牌信息') || (item.innerText || '').includes('额度设置')
+                    ));
+                    if (!root) {
+                        root = roots.find((item) => item && isVisible(item));
+                    }
+                    return root || document.body;
+                }
+
+                function isWritableInput(input) {
+                    if (!input) return false;
+                    if (!isVisible(input)) return false;
+                    if (input.disabled) return false;
+                    const type = String(input.type || '').toLowerCase();
+                    if (type === 'hidden') return false;
+                    return true;
+                }
+
+                function addCandidate(list, input, strategy) {
+                    if (!isWritableInput(input)) return;
+                    if (!list.some((item) => item.input === input)) {
+                        list.push({ input, strategy });
+                    }
+                }
+
+                function collectCandidates(root) {
+                    const list = [];
+
+                    // 优先：根据“额度”标签向上回溯输入框
+                    const labels = Array.from(root.querySelectorAll('*')).filter((el) => {
+                        return normalizeText(el.textContent || '') === '额度';
+                    });
+                    for (const label of labels) {
+                        let node = label;
+                        for (let i = 0; i < 8 && node; i += 1) {
+                            const parent = node.parentElement;
+                            if (!parent) break;
+                            const input = parent.querySelector('input');
+                            if (input) {
+                                addCandidate(list, input, 'label_quota');
+                            }
+                            node = parent;
+                        }
+                    }
+
+                    // 次优：按语义属性匹配
+                    const semanticInputs = Array.from(root.querySelectorAll('input')).filter((input) => {
+                        if (!isWritableInput(input)) return false;
+                        const haystack = [
+                            input.getAttribute('placeholder') || '',
+                            input.getAttribute('name') || '',
+                            input.getAttribute('id') || '',
+                            input.getAttribute('aria-label') || '',
+                            input.className || ''
+                        ].join(' ').toLowerCase();
+                        return (
+                            haystack.includes('额度') ||
+                            haystack.includes('quota') ||
+                            haystack.includes('limit')
+                        );
+                    });
+                    for (const input of semanticInputs) {
+                        addCandidate(list, input, 'semantic');
+                    }
+
+                    // 最后：弹窗内可写输入框兜底
+                    const fallbackInputs = Array.from(root.querySelectorAll('input'));
+                    for (const input of fallbackInputs) {
+                        addCandidate(list, input, 'fallback');
+                    }
+
+                    return list;
+                }
+
+                function writeInputValue(input, value) {
+                    try {
+                        input.removeAttribute('readonly');
+                    } catch (e) {}
+
+                    const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+                    if (descriptor && descriptor.set) {
+                        descriptor.set.call(input, value);
+                    } else {
+                        input.value = value;
+                    }
+
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    input.dispatchEvent(new Event('blur', { bubbles: true }));
+                    input.dispatchEvent(new KeyboardEvent('keyup', {
+                        bubbles: true,
+                        key: 'Enter',
+                        code: 'Enter'
+                    }));
+                }
+
+                const root = locateRoot();
+                const candidates = collectCandidates(root);
+
+                if (!candidates.length) {
+                    return {
+                        ok: false,
+                        reason: 'quota_input_not_found',
+                        candidateCount: 0
+                    };
+                }
+
+                const targetDigits = normalizeDigits(targetQuota);
+                const tried = [];
+                for (let idx = 0; idx < candidates.length; idx += 1) {
+                    const item = candidates[idx];
+                    const input = item.input;
+
+                    try {
+                        input.focus();
+                    } catch (e) {}
+
+                    writeInputValue(input, targetQuota);
+                    const currentDigits = normalizeDigits(input.value || '');
+                    const currentText = normalizeText(input.value || '');
+
+                    tried.push({
+                        index: idx + 1,
+                        strategy: item.strategy,
+                        value: currentText
+                    });
+
+                    if (currentDigits === targetDigits) {
+                        return {
+                            ok: true,
+                            reason: 'written',
+                            strategy: item.strategy,
+                            index: idx + 1,
+                            value: currentText,
+                            candidateCount: candidates.length,
+                            tried
+                        };
+                    }
+                }
+
+                return {
+                    ok: false,
+                    reason: 'write_verify_failed',
+                    candidateCount: candidates.length,
+                    tried
+                };
+                """,
+                quota_value
+            )
+
+            if not isinstance(write_result, dict):
+                self.logger.debug(f"额度输入返回异常结果: {write_result}")
+                return False, "额度输入返回异常结果"
+
+            if not write_result.get("ok"):
+                self.logger.debug(f"额度输入失败详情: {write_result}")
+                return False, f"未能写入额度值: {write_result.get('reason')}"
+
+            self.logger.debug(
+                "额度输入框赋值成功: "
+                f"strategy={write_result.get('strategy')},"
+                f"index={write_result.get('index')}/{write_result.get('candidateCount')},"
+                f"value={write_result.get('value')}"
+            )
+            return True, ""
+        except Exception as e:
+            self.logger.debug(f"额度输入写入异常: {e}")
+            return False, f"填写额度失败: {e}"
+
+    def _submit_quota_modal(self, timeout: int = 8) -> Tuple[bool, str]:
+        """提交编辑弹窗并等待关闭"""
+        driver = self.browser.driver
+        self.logger.debug("准备提交额度编辑弹窗")
+
+        try:
+            submit_button = driver.execute_script(
+                """
+                function isVisible(node) {
+                    if (!node) return false;
+                    const style = window.getComputedStyle(node);
+                    if (style.display === 'none' || style.visibility === 'hidden') return false;
+                    const rect = node.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                }
+                const roots = Array.from(document.querySelectorAll(
+                    '.semi-modal-content, .semi-modal, .semi-sidesheet, .semi-sidesheet-content, .semi-sideSheet, [class*="sidesheet"], [class*="sideSheet"], [role="dialog"]'
+                ));
+                let root = roots.find((item) => item && isVisible(item) && (
+                    (item.innerText || '').includes('更新令牌信息') || (item.innerText || '').includes('额度设置')
+                ));
+                if (!root) {
+                    root = roots.find((item) => item && isVisible(item));
+                }
+                if (!root) {
+                    root = document.body;
+                }
+
+                const buttons = Array.from(root.querySelectorAll('button'))
+                    .filter((btn) => {
+                        const text = (btn.innerText || btn.textContent || '').trim();
+                        return text.includes('提交') && isVisible(btn) && !btn.disabled;
+                    });
+                return buttons.length ? buttons[0] : null;
+                """
+            )
+
+            if not submit_button:
+                self.logger.debug("未定位到提交按钮")
+                return False, "未找到提交按钮"
+
+            driver.execute_script("arguments[0].click();", submit_button)
+            self.logger.debug("已点击提交按钮")
+        except Exception as e:
+            self.logger.debug(f"点击提交按钮异常: {e}")
+            return False, f"提交额度失败: {e}"
+
+        try:
+            WebDriverWait(driver, timeout).until(
+                lambda d: not d.execute_script(
+                    """
+                    function isVisible(node) {
+                        if (!node) return false;
+                        const style = window.getComputedStyle(node);
+                        if (style.display === 'none' || style.visibility === 'hidden') return false;
+                        const rect = node.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0;
+                    }
+                    const roots = Array.from(document.querySelectorAll(
+                        '.semi-modal-content, .semi-modal, .semi-sidesheet, .semi-sidesheet-content, .semi-sideSheet, [class*="sidesheet"], [class*="sideSheet"], [role="dialog"]'
+                    ));
+                    return roots.some((root) => {
+                        if (!root || !isVisible(root)) return false;
+                        const text = root.innerText || '';
+                        return text.includes('更新令牌信息') || text.includes('额度设置');
+                    });
+                    """
+                )
+            )
+            self.logger.debug("提交后弹窗已关闭")
+            return True, ""
+        except TimeoutException:
+            self.logger.debug("提交后弹窗未关闭（超时）")
+            return False, "提交后弹窗未关闭，可能保存失败"
 
 
 class BalanceExtractor:
