@@ -50,6 +50,7 @@ class BrowserManager:
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
+        options.add_argument("--remote-debugging-port=0")  # 自动分配可用端口，避免冲突
 
         # 窗口大小
         window_size = self.config.get("window_size", "1920,1080")
